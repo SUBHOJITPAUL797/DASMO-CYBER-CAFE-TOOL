@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
 import androidx.lifecycle.ViewModel
@@ -38,6 +39,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 enum class UploadFormat {
     JPEG,
@@ -56,6 +58,19 @@ class HomeViewModel(
     private val settingsRepository: SettingsRepository,
     private val context: Context
 ) : ViewModel() {
+
+    private val textRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            textRecognizer.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
 
     val documents = database.documentDao().getAllDocuments()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -734,6 +749,7 @@ class HomeViewModel(
         checkedDocumentType: String,
         format: UploadFormat
     ) {
+        var obtainedToken: String? = null
         try {
             updateQueueStatus(queueId, "Authorizing Google Drive...")
             
@@ -745,7 +761,7 @@ class HomeViewModel(
                 return
             }
             
-            var obtainedToken = getAccessToken(context, email)
+            obtainedToken = getAccessToken(context, email)
             if (obtainedToken == null) {
                 updateQueueStatus(queueId, "Failed: Sign-In required")
                 return
@@ -761,46 +777,96 @@ class HomeViewModel(
             val finalJpgName = "${finalNameBase}.jpeg"
             val finalPdfName = "${finalNameBase}.pdf"
 
-            var uploadParentId = folderId
             val subFolderName = targetSubfolder.value.trim()
-            if (subFolderName.isNotEmpty()) {
-                updateQueueStatus(queueId, "Locating subfolder: $subFolderName...")
-                val subFolderId = GoogleDriveClient.getOrCreateFolder(obtainedToken, subFolderName, folderId)
-                if (subFolderId != null) {
-                    uploadParentId = subFolderId
-                }
-            }
 
+            var uploadParentId = folderId
             var isJpgUploaded = false
             var isPdfUploaded = false
 
-            if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                updateQueueStatus(queueId, "Uploading image standard file...")
-                isJpgUploaded = GoogleDriveClient.uploadFile(
-                    accessToken = obtainedToken,
-                    file = compressedFile,
-                    mimeType = "image/jpeg",
-                    fileName = finalJpgName,
-                    parentId = uploadParentId
-                )
-            }
+            var tokenAttempts = 0
+            val maxTokenAttempts = 2
 
-            if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                updateQueueStatus(queueId, "Generating structured PDF...")
-                val pdfFile = File(context.cacheDir, "${System.currentTimeMillis().hashCode()}_pdf.pdf")
+            while (tokenAttempts < maxTokenAttempts) {
                 try {
-                    ImageProcessor.convertToPdf(compressedFile, pdfFile, targetSizeKb.value)
+                    val token = obtainedToken ?: break
+                    
+                    if (subFolderName.isNotEmpty()) {
+                        updateQueueStatus(queueId, "Locating subfolder: $subFolderName...")
+                        val subFolderId = retryIO(times = 3) {
+                            GoogleDriveClient.getOrCreateFolder(token, subFolderName, folderId)
+                        }
+                        if (subFolderId != null) {
+                            uploadParentId = subFolderId
+                        }
+                    }
 
-                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                    isPdfUploaded = GoogleDriveClient.uploadFile(
-                        accessToken = obtainedToken,
-                        file = pdfFile,
-                        mimeType = "application/pdf",
-                        fileName = finalPdfName,
-                        parentId = uploadParentId
-                    )
-                } finally {
-                    try { pdfFile.delete() } catch (ed: Exception) {}
+                    if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
+                        updateQueueStatus(queueId, "Uploading image standard file...")
+                        isJpgUploaded = retryIO(times = 3) {
+                            GoogleDriveClient.uploadFile(
+                                accessToken = token,
+                                file = compressedFile,
+                                mimeType = "image/jpeg",
+                                fileName = finalJpgName,
+                                parentId = uploadParentId
+                            )
+                        }
+                    }
+
+                    if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                        updateQueueStatus(queueId, "Generating structured PDF...")
+                        val pdfFile = File(context.cacheDir, "${System.currentTimeMillis().hashCode()}_pdf.pdf")
+                        try {
+                            ImageProcessor.convertToPdf(compressedFile, pdfFile, targetSizeKb.value)
+
+                            updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                            isPdfUploaded = retryIO(times = 3) {
+                                GoogleDriveClient.uploadFile(
+                                    accessToken = token,
+                                    file = pdfFile,
+                                    mimeType = "application/pdf",
+                                    fileName = finalPdfName,
+                                    parentId = uploadParentId
+                                )
+                            }
+                        } finally {
+                            try { pdfFile.delete() } catch (ed: Exception) {}
+                        }
+                    }
+
+                    break
+
+                } catch (e: Exception) {
+                    val errorMsg = e.message ?: ""
+                    android.util.Log.e("HomeViewModel", "Background upload try failed: $errorMsg", e)
+                    
+                    val isAuthError = errorMsg.contains("401") || 
+                                      errorMsg.contains("unauthorized", ignoreCase = true) || 
+                                      errorMsg.contains("token", ignoreCase = true) || 
+                                      errorMsg.contains("auth", ignoreCase = true)
+                    
+                    if (isAuthError && tokenAttempts < maxTokenAttempts - 1) {
+                        tokenAttempts++
+                        updateQueueStatus(queueId, "Token expired. Refreshing...")
+                        
+                        obtainedToken?.let { staleToken ->
+                            withContext(Dispatchers.IO) {
+                                try {
+                                    com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, staleToken)
+                                } catch (ex: Exception) {
+                                    ex.printStackTrace()
+                                }
+                            }
+                        }
+                        
+                        obtainedToken = getAccessToken(context, email)
+                        if (obtainedToken == null) {
+                            updateQueueStatus(queueId, "Failed: Refresh failed")
+                            return
+                        }
+                    } else {
+                        throw e
+                    }
                 }
             }
 
@@ -811,7 +877,6 @@ class HomeViewModel(
             val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
             val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
 
-            // Save locally
             val localCopy = File(context.filesDir, finalJpgName)
             compressedFile.copyTo(localCopy, overwrite = true)
             
@@ -832,10 +897,31 @@ class HomeViewModel(
             updateQueueStatus(queueId, if (overallSuccess) "Completed" else "Saved locally (Drive fail)")
         } catch (e: Exception) {
             e.printStackTrace()
-            updateQueueStatus(queueId, "Failed: ${e.message}")
+            updateQueueStatus(queueId, "Failed: ${e.localizedMessage ?: e.message}")
+            obtainedToken?.let { invalidateCachedToken(context, it) }
         } finally {
             try { compressedFile.delete() } catch (ex: Exception) {}
         }
+    }
+
+    private suspend fun <T> retryIO(
+        times: Int = 3,
+        initialDelay: Long = 1000,
+        maxDelay: Long = 6000,
+        factor: Double = 2.0,
+        block: suspend () -> T
+    ): T {
+        var currentDelay = initialDelay
+        repeat(times - 1) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                kotlinx.coroutines.delay(currentDelay)
+                currentDelay = (currentDelay * factor).toLong().coerceAtMost(maxDelay)
+            }
+        }
+        return block()
     }
 
     fun uploadInBackground(context: Context, personName: String, documentType: String, format: UploadFormat) {
@@ -1049,25 +1135,40 @@ class HomeViewModel(
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
-    private suspend fun analyzeDocumentLocally(imageFile: File): DocumentAnalysisResult = suspendCoroutine { continuation ->
-        try {
-            val image = InputImage.fromFilePath(context, Uri.fromFile(imageFile))
-            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-            recognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    val fullText = visionText.text
-                    val result = extractLocalDetails(fullText)
-                    try { recognizer.close() } catch (ex: Exception) {}
-                    continuation.resume(result)
+    private suspend fun analyzeDocumentLocally(imageFile: File): DocumentAnalysisResult = withContext(Dispatchers.IO) {
+        suspendCancellableCoroutine { continuation ->
+            var bitmap: Bitmap? = null
+            try {
+                bitmap = BitmapFactory.decodeFile(imageFile.absolutePath)
+                if (bitmap == null) {
+                    continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
+                    return@suspendCancellableCoroutine
                 }
-                .addOnFailureListener { e ->
-                    e.printStackTrace()
-                    try { recognizer.close() } catch (ex: Exception) {}
+                val image = InputImage.fromBitmap(bitmap, 0)
+                
+                textRecognizer.process(image)
+                    .addOnSuccessListener { visionText ->
+                        if (continuation.isActive) {
+                            val fullText = visionText.text
+                            val result = extractLocalDetails(fullText)
+                            continuation.resume(result)
+                        }
+                        try { bitmap.recycle() } catch (ex: Exception) {}
+                    }
+                    .addOnFailureListener { e ->
+                        e.printStackTrace()
+                        if (continuation.isActive) {
+                            continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
+                        }
+                        try { bitmap.recycle() } catch (ex: Exception) {}
+                    }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                if (continuation.isActive) {
                     continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
                 }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
+                try { bitmap?.recycle() } catch (ex: Exception) {}
+            }
         }
     }
 
@@ -1196,12 +1297,33 @@ class HomeViewModel(
     }
 
     private fun sanitizePersonName(detectedName: String): String {
-        val nameLower = detectedName.trim().lowercase()
+        var cleaned = detectedName.trim()
+        if (cleaned.isEmpty() || cleaned.lowercase() == "unknown") {
+            return "Unknown"
+        }
+
+        // 1. Clean up typical labels prefixing the name (case-insensitive, with or without colons/dashes/spaces) FIRST
+        val prefixes = listOf(
+            "card holder name", "cardholder name", "name of holder", "holder name", 
+            "card holder", "cardholder", "head of family", "relation name", "full name", 
+            "father's name", "father name", "mother's name", "mother name", "husband's name",
+            "husband name", "नाम", "name"
+        )
+        
+        for (pref in prefixes) {
+            val lowerCleaned = cleaned.lowercase()
+            if (lowerCleaned.startsWith(pref)) {
+                cleaned = cleaned.substring(pref.length).trim(':', '-', ' ', '=', '।', '/', ',')
+                break
+            }
+        }
+
+        val nameLower = cleaned.lowercase()
         if (nameLower.isEmpty() || nameLower == "unknown") {
             return "Unknown"
         }
 
-        // Blacklisted exact/substring labels
+        // 2. Blacklisted exact/substring labels to reject lines which are just instructions or headers
         val blacklist = listOf(
             "card holder", "cardholder", "holder name", "name of holder", "head of family", "father's name", "father name", "father", "mother", "mother's name", "husband", "spouse", "parent", 
             "voter id", "aadhaar", "aadhar", "pan card", "passport", "driving license", "driving licence", "marksheet", "ration card", 
@@ -1214,15 +1336,6 @@ class HomeViewModel(
         for (black in blacklist) {
             if (nameLower == black || nameLower.startsWith(black) || (nameLower.length <= black.length + 4 && nameLower.contains(black))) {
                 return "Unknown"
-            }
-        }
-
-        // Clean up typical labels prefixing the name if any (e.g. "Name : John Doe" -> "John Doe")
-        var cleaned = detectedName.trim()
-        val prefixes = listOf("name:", "name of holder:", "card holder:", "holder:", "full name:", "नाम:", "card holder name:", "cardholder name:")
-        for (pref in prefixes) {
-            if (cleaned.lowercase().startsWith(pref)) {
-                cleaned = cleaned.substring(pref.length).trim(':', '-', ' ', '=', '।', '/')
             }
         }
 
@@ -1255,7 +1368,7 @@ class HomeViewModel(
             return "Driving License"
         }
         if (typeLower.contains("voter") || typeLower.contains("election") || typeLower.contains("elector") || typeLower.contains("epic") || typeLower.contains("identity card") || typeLower.contains("identity_card") || textLower.contains("voter") || textLower.contains("election commission") || textLower.contains("epic") || textLower.contains("elector photo")) {
-            return "Voter ID"
+            return "Voter Card"
         }
         if (typeLower.contains("marksheet") || typeLower.contains("mark sheet") || textLower.contains("marksheet") || textLower.contains("mark sheet") || textLower.contains("roll no") || textLower.contains("examination")) {
             return "Marksheet"
@@ -1264,9 +1377,9 @@ class HomeViewModel(
             return "Ration Card"
         }
 
-        // 2. Generic identity mapping: if "identity card" falls through to this point, Map it to Voter ID (which is the main Identity Card on Indian Govt Portals)
+        // 2. Generic identity mapping: if "identity card" falls through to this point, Map it to Voter Card
         if (typeLower.contains("identity")) {
-            return "Voter ID"
+            return "Voter Card"
         }
 
         return detectedType.trim().split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
