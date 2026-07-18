@@ -5,6 +5,7 @@ plugins {
   alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
   alias(libs.plugins.secrets)
+  id("com.google.gms.google-services")
 }
 
 android {
@@ -12,7 +13,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "dasmo.subhojit.tools"
+    applicationId = "tools.subhojit.dasmo"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
@@ -76,6 +77,9 @@ secrets {
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
+  implementation("com.google.firebase:firebase-firestore")
+  implementation("com.google.firebase:firebase-auth")
+  implementation("com.google.firebase:firebase-storage")
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   // implementation(libs.androidx.camera.camera2)
@@ -106,6 +110,7 @@ dependencies {
   implementation(libs.okhttp)
   implementation(libs.play.services.mlkit.document.scanner)
   implementation(libs.play.services.mlkit.text.recognition)
+  implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta4")
   implementation(libs.play.services.auth)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)

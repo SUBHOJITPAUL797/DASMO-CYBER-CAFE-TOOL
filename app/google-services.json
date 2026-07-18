@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "490633569828",
+    "project_id": "dasmo-scanner-android",
+    "storage_bucket": "dasmo-scanner-android.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:490633569828:android:809a623db095d6cd86dab1",
+        "android_client_info": {
+          "package_name": "tools.subhojit.dasmo"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDjVqas7AANFiZLpVUUuxqBXAPwRIdAQzM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,5 +1,8 @@
 package com.example.ui
 
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.storage.FirebaseStorage
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -28,6 +31,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -41,6 +46,14 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.suspendCancellableCoroutine
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import com.example.MainActivity
+
 enum class UploadFormat {
     JPEG,
     PDF,
@@ -48,9 +61,34 @@ enum class UploadFormat {
 }
 
 data class PendingDocument(
+    val queueId: String,
     val compressedFile: File,
     val initialPersonName: String,
-    val initialDocumentType: String
+    val initialDocumentType: String,
+    val pageFiles: List<File>? = null
+)
+
+data class BatchGroup(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val uris: List<Uri>,
+    val isIdCard: Boolean
+)
+
+enum class AuthState {
+    LOADING,
+    NOT_LOGGED_IN,
+    DEVICE_MISMATCH,
+    PENDING_APPROVAL,
+    APPROVED
+}
+
+data class AppUser(
+    val email: String = "",
+    val deviceId: String = "",
+    val isApproved: Boolean = false,
+    val isAdmin: Boolean = false,
+    val role: String = "user",
+    val status: String = "pending"
 )
 
 class HomeViewModel(
@@ -58,6 +96,9 @@ class HomeViewModel(
     private val settingsRepository: SettingsRepository,
     private val context: Context
 ) : ViewModel() {
+
+    private val _batchVerificationGroups = MutableStateFlow<List<BatchGroup>?>(null)
+    val batchVerificationGroups: StateFlow<List<BatchGroup>?> = _batchVerificationGroups.asStateFlow()
 
     private val textRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -78,6 +119,352 @@ class HomeViewModel(
     val targetSizeKb = settingsRepository.targetSizeKb
         .stateIn(viewModelScope, SharingStarted.Lazily, 500)
 
+    val autoEnhanceEnabled = settingsRepository.autoEnhanceEnabled
+        .stateIn(viewModelScope, SharingStarted.Lazily, true)
+
+    private val firestore = FirebaseFirestore.getInstance()
+    private var authListenerRegistration: ListenerRegistration? = null
+    private var usersListenerRegistration: ListenerRegistration? = null
+
+    private val _authState = MutableStateFlow(AuthState.LOADING)
+    val authState: StateFlow<AuthState> = _authState.asStateFlow()
+
+    private val _isAdmin = MutableStateFlow(false)
+    val isAdmin: StateFlow<Boolean> = _isAdmin.asStateFlow()
+
+    private val _allUsers = MutableStateFlow<List<AppUser>>(emptyList())
+    val allUsers: StateFlow<List<AppUser>> = _allUsers.asStateFlow()
+
+    fun startAuthListening(deviceId: String) {
+        viewModelScope.launch {
+            googleEmail.collect { email ->
+                authListenerRegistration?.remove()
+                usersListenerRegistration?.remove()
+
+                if (email.isNullOrEmpty()) {
+                    _authState.value = AuthState.NOT_LOGGED_IN
+                    _isAdmin.value = false
+                } else {
+                    val normalizedEmail = email.trim().lowercase()
+                    val docRef = firestore.collection("dasmo_doc_scanner").document(normalizedEmail)
+                    val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
+
+                    authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
+                        if (e != null) {
+                            _statusMessage.value = "Auth Sync Error: ${e.message}"
+                            _authState.value = AuthState.NOT_LOGGED_IN
+                            return@addSnapshotListener
+                        }
+                        if (snapshot != null && snapshot.exists()) {
+                            val savedDeviceId = snapshot.getString("deviceId")
+                            val isApproved = snapshot.getBoolean("isApproved") ?: false
+                            val isAdminStatus = snapshot.getBoolean("isAdmin") ?: false
+                            val role = snapshot.getString("role") ?: ""
+                            val status = snapshot.getString("status") ?: ""
+
+                            val actualApproved = isApproved || status == "approved"
+                            val actualAdmin = isAdminEmail || isAdminStatus || role == "admin"
+
+                            val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
+
+                            if (savedDeviceId.isNullOrEmpty()) {
+                                // First time logging in from this app, claim the device ID
+                                docRef.update("deviceId", safeDeviceId).addOnFailureListener { err ->
+                                    _statusMessage.value = "Failed to register device: ${err.message}"
+                                    _authState.value = AuthState.NOT_LOGGED_IN
+                                }
+                                return@addSnapshotListener
+                            } else if (savedDeviceId != safeDeviceId) {
+                                _authState.value = AuthState.DEVICE_MISMATCH
+                            } else if (actualAdmin || actualApproved) {
+                                _authState.value = AuthState.APPROVED
+                                _isAdmin.value = actualAdmin
+                                if (actualAdmin) listenToAllUsers()
+                                startFirestoreSync()
+                            } else {
+                                _authState.value = AuthState.PENDING_APPROVAL
+                            }
+                        } else {
+                            val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
+                            val user = mapOf(
+                                "email" to normalizedEmail,
+                                "deviceId" to safeDeviceId,
+                                "isApproved" to isAdminEmail,
+                                "isAdmin" to isAdminEmail,
+                                "role" to if (isAdminEmail) "admin" else "user",
+                                "status" to if (isAdminEmail) "approved" else "pending"
+                            )
+                            docRef.set(user).addOnSuccessListener {
+                                _statusMessage.value = "Account created. Waiting for admin approval."
+                            }.addOnFailureListener { err ->
+                                err.printStackTrace()
+                                _statusMessage.value = "Database Write Denied: ${err.message}"
+                                _authState.value = AuthState.NOT_LOGGED_IN
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun listenToAllUsers() {
+        usersListenerRegistration?.remove()
+        usersListenerRegistration = firestore.collection("dasmo_doc_scanner").addSnapshotListener { snapshot, e ->
+            if (e != null) {
+                _statusMessage.value = "Error loading users: ${e.message}"
+                return@addSnapshotListener
+            }
+            if (snapshot != null) {
+                val oldPendingEmails = _allUsers.value
+                    .filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
+                    .map { it.email.trim().lowercase() }
+                    .toSet()
+
+                val users = snapshot.documents.mapNotNull { doc ->
+                    val email = doc.getString("email")?.takeIf { it.isNotBlank() } ?: doc.id
+                    val isApprovedVal = doc.getBoolean("isApproved") ?: false
+                    val statusVal = doc.getString("status") ?: ""
+                    AppUser(
+                        email = email,
+                        deviceId = doc.getString("deviceId") ?: "",
+                        isApproved = isApprovedVal || statusVal == "approved",
+                        isAdmin = email.trim().lowercase() == "subhojitpaul26042004@gmail.com",
+                        role = if (email.trim().lowercase() == "subhojitpaul26042004@gmail.com") "admin" else "user",
+                        status = statusVal.ifEmpty { "pending" }
+                    )
+                }
+
+                if (_allUsers.value.isNotEmpty()) {
+                    val currentPending = users.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
+                    for (u in currentPending) {
+                        val normEmail = u.email.trim().lowercase()
+                        if (!oldPendingEmails.contains(normEmail)) {
+                            _newRequestNotification.value = u.email
+                            sendSystemNotification(u.email)
+                        }
+                    }
+                }
+
+                _allUsers.value = users
+            }
+        }
+    }
+
+    fun toggleUserApproval(email: String, currentStatus: Boolean) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        val newApproved = !currentStatus
+        val newStatus = if (newApproved) "approved" else "pending"
+        firestore.collection("dasmo_doc_scanner").document(email).update(
+            "isApproved", newApproved,
+            "status", newStatus
+        )
+    }
+
+    fun approveUser(email: String) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        firestore.collection("dasmo_doc_scanner").document(email).update(
+            "isApproved", true,
+            "status", "approved"
+        ).addOnSuccessListener {
+            _statusMessage.value = "User $email approved successfully!"
+        }.addOnFailureListener { e ->
+            _statusMessage.value = "Failed to approve $email: ${e.localizedMessage}"
+        }
+    }
+
+    fun revokeUserDevice(email: String) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        firestore.collection("dasmo_doc_scanner").document(email).update(
+            "deviceId", "",
+            "isApproved", false,
+            "status", "pending"
+        ).addOnFailureListener {
+            it.printStackTrace()
+        }
+    }
+
+    private fun sendSystemNotification(email: String) {
+        try {
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channelId = "admin_notifications"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    channelId,
+                    "Admin Alerts",
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Alerts for new user access requests"
+                    enableLights(true)
+                    enableVibration(true)
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+
+            val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            val pendingIntent = if (intent != null) {
+                PendingIntent.getActivity(
+                    context,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            } else {
+                null
+            }
+
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Access Requested")
+                .setContentText("User $email is requesting access.")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            notificationManager.notify(email.hashCode(), notification)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private var scannedDocsListenerRegistration: ListenerRegistration? = null
+
+    fun startFirestoreSync() {
+        scannedDocsListenerRegistration?.remove()
+        scannedDocsListenerRegistration = firestore.collection("dasmo_doc_scanner_documents")
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) return@addSnapshotListener
+                if (snapshot != null) {
+                    viewModelScope.launch(Dispatchers.IO) {
+                        for (doc in snapshot.documents) {
+                            val fileName = doc.getString("fileName") ?: continue
+                            val personName = doc.getString("personName") ?: ""
+                            val documentType = doc.getString("documentType") ?: ""
+                            val timestamp = doc.getLong("timestamp") ?: 0L
+                            val isUploaded = doc.getBoolean("isUploaded") ?: false
+                            val drivePath = doc.getString("drivePath")
+                            val firebaseUrl = doc.getString("firebaseUrl")
+
+                            // Check if this exists locally
+                            val localDocs = database.documentDao().getAllDocuments().first()
+                            val existingLocal = localDocs.find { it.fileName == fileName }
+
+                            if (existingLocal == null) {
+                                // Save it locally
+                                val localFile = File(context.filesDir, fileName)
+                                val newEntity = DocumentEntity(
+                                    fileName = fileName,
+                                    personName = personName,
+                                    documentType = documentType,
+                                    localFilePath = localFile.absolutePath,
+                                    timestamp = timestamp,
+                                    isUploaded = isUploaded,
+                                    drivePath = drivePath
+                                )
+                                database.documentDao().insertDocument(newEntity)
+
+                                // Download the file if firebaseUrl is available
+                                if (!firebaseUrl.isNullOrEmpty()) {
+                                    downloadAndSaveFile(firebaseUrl, localFile)
+                                }
+                            } else {
+                                // If the local file doesn't exist but we have a firebaseUrl, download it
+                                val localFile = File(existingLocal.localFilePath)
+                                if (!localFile.exists() && !firebaseUrl.isNullOrEmpty()) {
+                                    downloadAndSaveFile(firebaseUrl, localFile)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+    }
+
+    private suspend fun downloadAndSaveFile(url: String, targetFile: File) {
+        withContext(Dispatchers.IO) {
+            try {
+                val client = okhttp3.OkHttpClient()
+                val request = okhttp3.Request.Builder().url(url).build()
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        response.body?.byteStream()?.use { input ->
+                            targetFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun uploadDocToFirestoreAndStorage(localFile: File, entity: DocumentEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val storageRef = FirebaseStorage.getInstance().reference
+                    .child("dasmo_doc_scanner_scans/${entity.fileName}")
+                val fileUri = Uri.fromFile(localFile)
+                
+                storageRef.putFile(fileUri)
+                    .addOnSuccessListener {
+                        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+                            val firebaseUrl = downloadUri.toString()
+                            val userEmail = googleEmail.value ?: "anonymous"
+                            val firestoreDoc = mapOf(
+                                "fileName" to entity.fileName,
+                                "personName" to entity.personName,
+                                "documentType" to entity.documentType,
+                                "timestamp" to entity.timestamp,
+                                "isUploaded" to entity.isUploaded,
+                                "drivePath" to entity.drivePath,
+                                "firebaseUrl" to firebaseUrl,
+                                "creatorEmail" to userEmail
+                            )
+                            firestore.collection("dasmo_doc_scanner_documents")
+                                .document(entity.fileName)
+                                .set(firestoreDoc)
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        android.util.Log.e("HomeViewModel", "Storage upload failed for ${entity.fileName}, saving fallback metadata", e)
+                        val userEmail = googleEmail.value ?: "anonymous"
+                        val firestoreDoc = mapOf(
+                            "fileName" to entity.fileName,
+                            "personName" to entity.personName,
+                            "documentType" to entity.documentType,
+                            "timestamp" to entity.timestamp,
+                            "isUploaded" to entity.isUploaded,
+                            "drivePath" to entity.drivePath,
+                            "creatorEmail" to userEmail
+                        )
+                        firestore.collection("dasmo_doc_scanner_documents")
+                            .document(entity.fileName)
+                            .set(firestoreDoc)
+                    }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    val useA4Format = settingsRepository.useA4Format
+        .stateIn(viewModelScope, SharingStarted.Lazily, true)
+
     val enableAiAnalysis = settingsRepository.enableAiAnalysis
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
 
@@ -96,21 +483,75 @@ class HomeViewModel(
     private val _targetSubfolder = MutableStateFlow("")
     val targetSubfolder = _targetSubfolder.asStateFlow()
 
+    private val _publicFolderSize = MutableStateFlow<Long>(0L)
+    val publicFolderSize = _publicFolderSize.asStateFlow()
+
+    fun updatePublicFolderSize() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val size = ImageProcessor.getPublicFolderSize(context)
+            _publicFolderSize.value = size
+        }
+    }
+
+    private val _subfolderAtLastSizeChange = MutableStateFlow<String?>(null)
+    val subfolderAtLastSizeChange = _subfolderAtLastSizeChange.asStateFlow()
+
+    fun setSubfolderAtLastSizeChange(value: String?) {
+        _subfolderAtLastSizeChange.value = value
+    }
+
+    init {
+        viewModelScope.launch {
+            _targetSubfolder.value = settingsRepository.targetSubfolder.first()
+        }
+        updatePublicFolderSize()
+    }
+
     fun setTargetSubfolder(name: String) {
         _targetSubfolder.value = name
+        viewModelScope.launch {
+            settingsRepository.setTargetSubfolder(name)
+        }
     }
 
-    // Scan Mode selection: standard pages vs A4 2-sided ID card merge
-    enum class ScanMode {
-        STANDARD,
-        A4_ID_MERGE
-    }
+    private val subFolderCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val subFolderMutex = kotlinx.coroutines.sync.Mutex()
+    private val backgroundUploadMutex = kotlinx.coroutines.sync.Mutex()
 
-    private val _scanMode = MutableStateFlow(ScanMode.A4_ID_MERGE)
-    val scanMode = _scanMode.asStateFlow()
+    private suspend fun getCachedOrFetchSubFolder(token: String, subFolderName: String, parentId: String): String {
+        val trimmedSubFolder = subFolderName.trim()
+        if (trimmedSubFolder.isEmpty()) {
+            return parentId
+        }
 
-    fun setScanMode(mode: ScanMode) {
-        _scanMode.value = mode
+        // Avoid creating a nested subfolder with the exact same name as the selected destination folder itself
+        try {
+            val destinationFolderName = settingsRepository.driveFolderName.first()
+            if (trimmedSubFolder.equals(destinationFolderName.trim(), ignoreCase = true)) {
+                android.util.Log.d("HomeViewModel", "Target subfolder '$trimmedSubFolder' is same as destination folder. Skipping nested folder creation.")
+                return parentId
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val cacheKey = "$parentId:${trimmedSubFolder.lowercase()}"
+        subFolderCache[cacheKey]?.let { return it }
+        
+        subFolderMutex.lock()
+        try {
+            subFolderCache[cacheKey]?.let { return it }
+            val subFolderId = retryIO(times = 3) { 
+                GoogleDriveClient.getOrCreateFolder(token, trimmedSubFolder, parentId) 
+            }
+            if (subFolderId != null) {
+                subFolderCache[cacheKey] = subFolderId
+                return subFolderId
+            }
+            return parentId
+        } finally {
+            subFolderMutex.unlock()
+        }
     }
 
     // Active background processing/upload tasks queue
@@ -127,9 +568,9 @@ class HomeViewModel(
     val activeQueue = _activeQueue.asStateFlow()
 
     fun clearActiveQueue() {
-        _activeQueue.value = _activeQueue.value.filter { 
+        _activeQueue.update { q -> q.filter { 
             !it.status.contains("Completed") && !it.status.contains("locally") && !it.status.contains("Failed") 
-        }
+        } }
     }
 
     val nameBeforeType = settingsRepository.nameBeforeType
@@ -147,8 +588,20 @@ class HomeViewModel(
     private val _statusMessage = MutableStateFlow("")
     val statusMessage = _statusMessage.asStateFlow()
 
-    private val _pendingDocument = MutableStateFlow<PendingDocument?>(null)
-    val pendingDocument = _pendingDocument.asStateFlow()
+    fun clearStatusMessage() {
+        _statusMessage.value = ""
+    }
+
+    private val _newRequestNotification = MutableStateFlow<String?>(null)
+    val newRequestNotification = _newRequestNotification.asStateFlow()
+
+    fun dismissNewRequestNotification() {
+        _newRequestNotification.value = null
+    }
+
+    private val _pendingDocuments = MutableStateFlow<List<PendingDocument>>(emptyList())
+    val pendingDocument: StateFlow<PendingDocument?> = _pendingDocuments.map { it.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     // Google Drive folder selection session details
     private val _currentFolderId = MutableStateFlow("root")
@@ -214,8 +667,9 @@ class HomeViewModel(
                     val combined = mutableListOf<com.example.network.DriveFile>()
                     combined.addAll(direct)
                     
-                    // 3. For each subfolder, retrieve its files
-                    for (folder in subFolderDefs) {
+                    // 3. For each subfolder, retrieve its files (limit to at most 10 recent folders to prevent timeouts if placed in root)
+                    val limitedSubfolders = subFolderDefs.take(10)
+                    for (folder in limitedSubfolders) {
                         try {
                             val subFiles = GoogleDriveClient.listFiles(obtainedToken, folder.id)
                             subFiles.forEach { it.folderName = folder.name }
@@ -242,6 +696,19 @@ class HomeViewModel(
     fun updateTargetSize(sizeKb: Int) {
         viewModelScope.launch {
             settingsRepository.setTargetSizeKb(sizeKb)
+            _subfolderAtLastSizeChange.value = _targetSubfolder.value
+        }
+    }
+
+    fun updateAutoEnhanceEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setAutoEnhanceEnabled(enabled)
+        }
+    }
+
+    fun updateUseA4Format(use: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setUseA4Format(use)
         }
     }
 
@@ -258,8 +725,13 @@ class HomeViewModel(
     }
 
     fun cancelPendingDocument() {
-        try { _pendingDocument.value?.compressedFile?.delete() } catch (e: Exception) {}
-        _pendingDocument.value = null
+        val pending = _pendingDocuments.value.firstOrNull() ?: return
+        try { pending.compressedFile.delete() } catch (e: Exception) {}
+        pending.pageFiles?.forEach { file ->
+            try { file.delete() } catch (e: Exception) {}
+        }
+        _pendingDocuments.update { it.drop(1) }
+        updateQueueStatus(pending.queueId, "Cancelled")
     }
 
     fun setGoogleEmail(email: String?) {
@@ -370,7 +842,7 @@ class HomeViewModel(
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken != null) {
-                    val newId = GoogleDriveClient.createFolder(obtainedToken, name, _currentFolderId.value)
+                    val newId = GoogleDriveClient.getOrCreateFolder(obtainedToken, name, _currentFolderId.value)
                     if (newId != null) {
                         val list = GoogleDriveClient.listFolders(obtainedToken, _currentFolderId.value)
                         _subfolders.value = list
@@ -460,38 +932,360 @@ class HomeViewModel(
         }
     }
 
+    private suspend fun isImageIdCard(context: Context, uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val options = android.graphics.BitmapFactory.Options()
+            options.inJustDecodeBounds = true
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                android.graphics.BitmapFactory.decodeStream(input, null, options)
+            }
+            val width = options.outWidth
+            val height = options.outHeight
+            
+            // Landscape documents are almost always ID cards
+            if (width > height) return@withContext true
+            
+            // For portrait documents (like Voter ID), check if it's smaller than a typical A4 page.
+            // A full A4 document is typically > 5 Megapixels.
+            // If the area is less than 4.5 Megapixels, we consider it an ID card.
+            val area = width * height
+            if (area < 4_500_000) return@withContext true
+            
+            return@withContext false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun processBatchScannedImages(imageUris: List<Uri>) {
+        if (imageUris.isEmpty()) return
+        
+        viewModelScope.launch {
+            _isProcessing.value = true
+            _statusMessage.value = "Processing batch..."
+
+            try {
+                val groupedUris = mutableListOf<BatchGroup>()
+                var i = 0
+                while (i < imageUris.size) {
+                    if (i + 1 < imageUris.size) {
+                        groupedUris.add(BatchGroup(uris = listOf(imageUris[i], imageUris[i+1]), isIdCard = false))
+                        i += 2
+                    } else {
+                        groupedUris.add(BatchGroup(uris = listOf(imageUris[i]), isIdCard = false))
+                        i += 1
+                    }
+                }
+
+                _isProcessing.value = false
+                _statusMessage.value = ""
+                
+                if (showConfirmation.value) {
+                    _batchVerificationGroups.value = groupedUris
+                } else {
+                    for (group in groupedUris) {
+                        processScannedImages(group.uris, null)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _isProcessing.value = false
+            }
+        }
+    }
+
+    fun dismissBatchVerification() {
+        _batchVerificationGroups.value = null
+    }
+
+    fun confirmBatchVerification(groups: List<BatchGroup>) {
+        _batchVerificationGroups.value = null
+        for (group in groups) {
+            processScannedImages(group.uris, null)
+        }
+    }
+
+    fun updateBatchGroups(newGroups: List<BatchGroup>) {
+        _batchVerificationGroups.value = newGroups
+    }
+
+    fun processMultiScannedImages(imageUris: List<Uri>) {
+        if (imageUris.isEmpty()) return
+        
+        viewModelScope.launch {
+            _isProcessing.value = true
+            val queueId = java.util.UUID.randomUUID().toString()
+            val format = UploadFormat.PDF
+            
+            val initialItem = QueueItem(
+                id = queueId,
+                personName = "New Multi-Scan",
+                documentType = "Document",
+                format = format,
+                status = "Processing multi-scan pages..."
+            )
+            _activeQueue.update { it + initialItem }
+
+            try {
+                _statusMessage.value = "Copying page images..."
+                updateQueueStatus(queueId, "Copying page images...")
+                val pageFiles = imageUris.mapIndexed { index, uri ->
+                    val file = File(context.cacheDir, "multi_page_${java.util.UUID.randomUUID()}_$index.jpeg")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        file.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    file
+                }
+
+                _statusMessage.value = "Creating preview image..."
+                updateQueueStatus(queueId, "Creating preview image...")
+                val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
+                val isId = imageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, imageUris.first())
+                val resultFile = if (isId) {
+                    ImageProcessor.combineImagesToA4(pageFiles.map { it.absolutePath }, combinedFile)
+                } else {
+                    ImageProcessor.combineImages(pageFiles.map { it.absolutePath }, combinedFile)
+                }
+                
+                if (resultFile == null) {
+                    _statusMessage.value = "Failed to combine images"
+                    updateQueueStatus(queueId, "Failed: Combined empty")
+                    _isProcessing.value = false
+                    return@launch
+                }
+
+                val targetKb = targetSizeKb.value
+                _statusMessage.value = "Compressing preview..."
+                updateQueueStatus(queueId, "Compressing preview...")
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb)
+                
+                try { resultFile.delete() } catch (e: Exception) {}
+
+                _statusMessage.value = "Analyzing first page with AI..."
+                updateQueueStatus(queueId, "Analyzing first page...")
+                val firstPageFile = pageFiles.first()
+                var personName = "Unknown"
+                var documentType = "Document"
+                
+                if (enableAiAnalysis.value) {
+                    try {
+                        val base64Image = encodeFileToBase64(firstPageFile)
+                        val analysis = analyzeDocumentWithNvidia(base64Image)
+                        personName = sanitizePersonName(analysis?.personName ?: "Unknown")
+                        documentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                } else {
+                    try {
+                        val localAnalysis = analyzeDocumentLocally(firstPageFile)
+                        personName = sanitizePersonName(localAnalysis.personName)
+                        documentType = sanitizeDocumentType(localAnalysis.documentType)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                _activeQueue.update { it.map { item ->
+                    if (item.id == queueId) item.copy(personName = personName, documentType = documentType) else item
+                } }
+
+                if (showConfirmation.value) {
+                    _statusMessage.value = "Multi-scan complete. Please confirm."
+                    updateQueueStatus(queueId, "Awaiting Confirmation")
+                    val item = PendingDocument(
+                        queueId = queueId,
+                        compressedFile = compressedPreviewFile,
+                        initialPersonName = personName,
+                        initialDocumentType = documentType,
+                        pageFiles = if (!isId) pageFiles else null
+                    )
+                    _pendingDocuments.update { it + item }
+                } else {
+                    _statusMessage.value = ""
+                    updateQueueStatus(queueId, "Saving automatically...")
+                    _isProcessing.value = false
+
+                    viewModelScope.launch {
+                        executeBackgroundUpload(
+                            context,
+                            queueId,
+                            compressedPreviewFile,
+                            personName,
+                            documentType,
+                            format,
+                            pageFiles = pageFiles
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _isProcessing.value = false
+                _statusMessage.value = "Failed: ${e.message}"
+                updateQueueStatus(queueId, "Failed: ${e.message}")
+            }
+        }
+    }
+
+    fun updateAndUploadDocument(
+        context: Context,
+        docId: Int,
+        personName: String,
+        documentType: String,
+        format: UploadFormat,
+        newPageUris: List<Uri>? = null
+    ) {
+        viewModelScope.launch {
+            _isProcessing.value = true
+            val queueId = java.util.UUID.randomUUID().toString()
+            
+            val initialItem = QueueItem(
+                id = queueId,
+                personName = personName,
+                documentType = documentType,
+                format = format,
+                status = "Updating document..."
+            )
+            _activeQueue.update { it + initialItem }
+
+            try {
+                val existingDoc = database.documentDao().getAllDocuments().first().find { it.id == docId }
+                if (existingDoc == null) {
+                    _statusMessage.value = "Error: Document not found in database."
+                    updateQueueStatus(queueId, "Failed: Not found")
+                    _isProcessing.value = false
+                    return@launch
+                }
+
+                val checkedPersonName = personName.trim().ifEmpty { "Client_${System.currentTimeMillis() % 100000}" }
+                val checkedDocumentType = documentType.trim().ifEmpty { "Document" }
+
+                var finalLocalFile = File(existingDoc.localFilePath)
+                var tempPageFiles: List<File>? = null
+                var isId = false
+
+                if (newPageUris != null && newPageUris.isNotEmpty()) {
+                    _statusMessage.value = "Processing new page scans..."
+                    updateQueueStatus(queueId, "Processing new scans...")
+                    
+                    tempPageFiles = newPageUris.mapIndexed { index, uri ->
+                        val file = File(context.cacheDir, "edit_page_${java.util.UUID.randomUUID()}_$index.jpeg")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            file.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        file
+                    }
+
+                    val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
+                    isId = newPageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, newPageUris.first())
+                    val resultFile = if (isId) {
+                        ImageProcessor.combineImagesToA4(tempPageFiles.map { it.absolutePath }, combinedFile)
+                    } else {
+                        ImageProcessor.combineImages(tempPageFiles.map { it.absolutePath }, combinedFile)
+                    }
+                    if (resultFile == null) {
+                        _statusMessage.value = "Failed to combine images."
+                        updateQueueStatus(queueId, "Failed: Combined empty")
+                        _isProcessing.value = false
+                        return@launch
+                    }
+
+                    val targetKb = targetSizeKb.value
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb)
+                    try { resultFile.delete() } catch (e: Exception) {}
+
+                    compressedFile.copyTo(finalLocalFile, overwrite = true)
+                    try { compressedFile.delete() } catch (e: Exception) {}
+                }
+
+                val finalJpgName = existingDoc.fileName.replace(".pdf", ".jpeg").replace(".PDF", ".jpeg")
+                val finalPdfName = existingDoc.fileName.replace(".jpeg", ".pdf").replace(".jpg", ".pdf")
+                val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
+
+                val updatedEntity = existingDoc.copy(
+                    fileName = dbFileName,
+                    personName = checkedPersonName,
+                    documentType = checkedDocumentType,
+                    isUploaded = false,
+                    timestamp = System.currentTimeMillis()
+                )
+                database.documentDao().updateDocument(updatedEntity)
+
+                _statusMessage.value = ""
+                updateQueueStatus(queueId, "Syncing changes...")
+
+                _isProcessing.value = false
+                viewModelScope.launch {
+                    executeBackgroundUpload(
+                        context = context,
+                        queueId = queueId,
+                        compressedFile = finalLocalFile,
+                        checkedPersonName = checkedPersonName,
+                        checkedDocumentType = checkedDocumentType,
+                        format = format,
+                        existingDocId = docId,
+                        pageFiles = if (tempPageFiles != null && !isId) tempPageFiles else null
+                    )
+                }
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _isProcessing.value = false
+                _statusMessage.value = "Update failed: ${e.message}"
+                updateQueueStatus(queueId, "Failed: ${e.message}")
+            }
+        }
+    }
+
     fun processScannedImages(imageUris: List<Uri>, pdfUri: Uri?) {
         if (imageUris.isEmpty()) return
         
         viewModelScope.launch {
             _isProcessing.value = true
+            val queueId = java.util.UUID.randomUUID().toString()
+            val format = UploadFormat.PDF
+            
+            // Immediately add to queue monitor representing live status from start to finish
+            val initialItem = QueueItem(
+                id = queueId,
+                personName = "New Scan",
+                documentType = "Document",
+                format = format,
+                status = "Combining images..."
+            )
+            _activeQueue.update { it + initialItem }
+
             try {
                 // 1. Resolve paths
                 _statusMessage.value = "Combining images..."
                 val paths = imageUris.mapIndexed { index, uri ->
-                    val file = File(context.cacheDir, "scan_${System.currentTimeMillis()}_$index.jpeg")
+                    val file = File(context.cacheDir, "scan_${java.util.UUID.randomUUID()}_$index.jpeg")
                     context.contentResolver.openInputStream(uri)?.use { input ->
                         file.outputStream().use { output -> input.copyTo(output) }
                     }
                     file.absolutePath
                 }
 
-                // 2. Combine images (respecting A4 2-sided scan mode)
-                val combinedFile = File(context.cacheDir, "combined_${System.currentTimeMillis()}.jpeg")
-                val resultFile = if (_scanMode.value == ScanMode.A4_ID_MERGE) {
+                // 2. Combine images (respecting A4 scan modes)
+                val combinedFile = File(context.cacheDir, "combined_${java.util.UUID.randomUUID()}.jpeg")
+                val isId = imageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, imageUris.first())
+                val resultFile = if (isId) {
                     ImageProcessor.combineImagesToA4(paths, combinedFile)
                 } else {
                     ImageProcessor.combineImages(paths, combinedFile)
                 }
                 if (resultFile == null) {
                     _statusMessage.value = "Failed to combine images"
+                    updateQueueStatus(queueId, "Failed: Combined empty")
                     _isProcessing.value = false
                     return@launch
                 }
 
                 // 3. Compress
-                _statusMessage.value = "Compressing to ${targetSizeKb.value}KB..."
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetSizeKb.value)
+                val targetKb = targetSizeKb.value
+                _statusMessage.value = "Compressing to ${targetKb}KB..."
+                updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
+                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb)
 
                 // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
                 paths.forEach { path ->
@@ -500,63 +1294,49 @@ class HomeViewModel(
                 try { resultFile.delete() } catch (e: Exception) {}
 
                 if (enableAiAnalysis.value) {
+                    _statusMessage.value = "Analyzing with AI..."
+                    updateQueueStatus(queueId, "Analyzing with Cloud AI...")
+                    
+                    val analysis = try {
+                        val base64Image = encodeFileToBase64(compressedFile)
+                        analyzeDocumentWithNvidia(base64Image)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    
+                    val checkedPersonName = sanitizePersonName(analysis?.personName ?: "Unknown")
+                    val checkedDocumentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
+                    
+                    _activeQueue.update { it.map { item ->
+                        if (item.id == queueId) item.copy(personName = checkedPersonName, documentType = checkedDocumentType) else item
+                    } }
+
                     if (showConfirmation.value) {
-                        // Cloud AI Mode WITH confirmation screen:
-                        _statusMessage.value = "Analyzing with AI..."
-                        val analysis = try {
-                            val base64Image = encodeFileToBase64(compressedFile)
-                            analyzeDocumentWithNvidia(base64Image)
-                        } catch (e: Exception) {
-                            null
-                        }
-                        
-                        val checkedPersonName = sanitizePersonName(analysis?.personName ?: "Unknown")
-                        val checkedDocumentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
                         _statusMessage.value = "AI Analysis complete. Please confirm."
-                        _pendingDocument.value = PendingDocument(
+                        updateQueueStatus(queueId, "Awaiting Confirmation")
+                        val item = PendingDocument(
+                            queueId = queueId,
                             compressedFile = compressedFile,
                             initialPersonName = checkedPersonName,
                             initialDocumentType = checkedDocumentType
                         )
+                        _pendingDocuments.update { it + item }
                     } else {
-                        // Cloud AI Mode WITHOUT confirmation screen (Instant background auto-save):
-                        _statusMessage.value = "Queued for AI background analysis..."
-                        val queueId = java.util.UUID.randomUUID().toString()
-                        val format = UploadFormat.PDF
-                        val initialItem = QueueItem(
-                            id = queueId,
-                            personName = "Analyzing AI...",
-                            documentType = "Document",
-                            format = format,
-                            status = "Analyzing with AI..."
-                        )
-                        _activeQueue.value = _activeQueue.value + initialItem
-
-                        _isProcessing.value = false // Release camera immediately
+                        // Cloud AI Mode WITHOUT confirmation screen:
+                        _statusMessage.value = ""
+                        updateQueueStatus(queueId, "Saving automatically...")
+                        _isProcessing.value = false
 
                         viewModelScope.launch {
-                            try {
-                                val base64Image = encodeFileToBase64(compressedFile)
-                                val analysis = analyzeDocumentWithNvidia(base64Image)
-                                
-                                val checkedPersonName = sanitizePersonName(analysis?.personName ?: "Unknown")
-                                val checkedDocumentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
-                                
-                                _activeQueue.value = _activeQueue.value.map {
-                                    if (it.id == queueId) it.copy(personName = checkedPersonName, documentType = checkedDocumentType) else it
-                                }
-                                executeBackgroundUpload(context, queueId, compressedFile, checkedPersonName, checkedDocumentType, format)
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                                updateQueueStatus(queueId, "Failed: AI Analysis Error")
-                                try { compressedFile.delete() } catch (ex: Exception) {}
-                            }
+                            executeBackgroundUpload(context, queueId, compressedFile, checkedPersonName, checkedDocumentType, format)
                         }
                         return@launch
                     }
                 } else {
                     // Local OCR Mode:
                     _statusMessage.value = "Running on-device local text recognition..."
+                    updateQueueStatus(queueId, "Running local text recognition...")
+                    
                     var personName = "Unknown"
                     var documentType = "Document"
                     try {
@@ -567,26 +1347,24 @@ class HomeViewModel(
                         e.printStackTrace()
                     }
 
+                    _activeQueue.update { it.map { item ->
+                        if (item.id == queueId) item.copy(personName = personName, documentType = documentType) else item
+                    } }
+
                     if (showConfirmation.value) {
                         _statusMessage.value = "Processing complete. Please confirm document details."
-                        _pendingDocument.value = PendingDocument(
+                        updateQueueStatus(queueId, "Awaiting Confirmation")
+                        val item = PendingDocument(
+                            queueId = queueId,
                             compressedFile = compressedFile,
                             initialPersonName = personName,
                             initialDocumentType = documentType
                         )
+                        _pendingDocuments.update { it + item }
                     } else {
                         // Local OCR WITHOUT confirmation screen (Instant direct upload):
-                        _statusMessage.value = "Uploading and saving automatically..."
-                        val queueId = java.util.UUID.randomUUID().toString()
-                        val format = UploadFormat.PDF
-                        val initialItem = QueueItem(
-                            id = queueId,
-                            personName = personName,
-                            documentType = documentType,
-                            format = format,
-                            status = "Saving automatically..."
-                        )
-                        _activeQueue.value = _activeQueue.value + initialItem
+                        _statusMessage.value = ""
+                        updateQueueStatus(queueId, "Saving automatically...")
                         _isProcessing.value = false
                         
                         viewModelScope.launch {
@@ -598,6 +1376,7 @@ class HomeViewModel(
             } catch (e: Exception) {
                 e.printStackTrace()
                 _statusMessage.value = "Error: ${e.message}"
+                updateQueueStatus(queueId, "Failed: ${e.localizedMessage ?: e.message}")
             } finally {
                 _isProcessing.value = false
             }
@@ -605,8 +1384,9 @@ class HomeViewModel(
     }
 
     fun confirmAndUpload(context: Context, personName: String, documentType: String, format: UploadFormat) {
-        val pending = _pendingDocument.value ?: return
-        _pendingDocument.value = null
+        val pending = _pendingDocuments.value.firstOrNull() ?: return
+        _pendingDocuments.update { it.drop(1) }
+        val queueId = pending.queueId
         
         val checkedPersonName = if (personName.trim().isEmpty()) {
             "Client_${System.currentTimeMillis() % 100000}"
@@ -619,6 +1399,15 @@ class HomeViewModel(
             documentType.trim()
         }
 
+        // Update queue item info & status
+        _activeQueue.update { it.map { item ->
+            if (item.id == queueId) item.copy(
+                personName = checkedPersonName,
+                documentType = checkedDocumentType,
+                status = "Authorizing Google..."
+            ) else item
+        } }
+
         viewModelScope.launch {
             _isProcessing.value = true
             _statusMessage.value = "Requesting Google authorization..."
@@ -626,10 +1415,56 @@ class HomeViewModel(
             val email = settingsRepository.googleEmail.first()
             val folderId = settingsRepository.driveFolderId.first()
 
+            val safePersonName = checkedPersonName.replace(" ", "_").trim()
+            val safeDocumentType = checkedDocumentType.replace(" ", "_").trim()
+            val suffixId = java.util.UUID.randomUUID().toString().take(4)
+            val finalNameBase = if (nameBeforeType.value) {
+                "${safePersonName}_${safeDocumentType}_$suffixId"
+            } else {
+                "${safeDocumentType}_${safePersonName}_$suffixId"
+            }
+            val finalJpgName = "${finalNameBase}.jpeg"
+            val finalPdfName = "${finalNameBase}.pdf"
+            val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
+            
+            // Save locally first to guarantee offline record!
+            val localCopy = File(context.filesDir, finalJpgName)
+            try {
+                pending.compressedFile.copyTo(localCopy, overwrite = true)
+                ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+            } catch (ecop: Exception) {
+                ecop.printStackTrace()
+            }
+
+            // Insert locally first
+            val insertId = try {
+                val newEntity = DocumentEntity(
+                    fileName = dbFileName,
+                    personName = checkedPersonName,
+                    documentType = checkedDocumentType,
+                    localFilePath = localCopy.absolutePath,
+                    timestamp = System.currentTimeMillis(),
+                    isUploaded = false,
+                    drivePath = null
+                )
+                val id = database.documentDao().insertDocument(newEntity)
+                if (id != -1L) {
+                    uploadDocToFirestoreAndStorage(localCopy, newEntity.copy(id = id.toInt()))
+                }
+                id
+            } catch (edb: Exception) {
+                edb.printStackTrace()
+                -1L
+            }
+
+            updateQueueStatus(queueId, "Syncing directly...")
+
             if (email.isNullOrEmpty()) {
-                _statusMessage.value = "Error: Please sign in with Google to upload scans to Drive!"
+                _statusMessage.value = "Error: Please sign in to sync with Drive! Saved locally."
+                updateQueueStatus(queueId, "Saved locally (Sign-In required)")
                 _isProcessing.value = false
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
+                fetchDriveFiles(context)
                 return@launch
             }
 
@@ -637,30 +1472,20 @@ class HomeViewModel(
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken == null) {
-                    _statusMessage.value = "Failed to retrieve Google token. Sign in again."
+                    _statusMessage.value = "Failed to retrieve Google token. Saved locally."
+                    updateQueueStatus(queueId, "Saved locally (Token failed)")
                     _isProcessing.value = false
                     try { pending.compressedFile.delete() } catch (el: Exception) {}
+                    fetchDriveFiles(context)
                     return@launch
                 }
-
-                val safePersonName = checkedPersonName.replace(" ", "_").trim()
-                val safeDocumentType = checkedDocumentType.replace(" ", "_").trim()
-                val finalNameBase = if (nameBeforeType.value) {
-                    "${safePersonName}_${safeDocumentType}"
-                } else {
-                    "${safeDocumentType}_${safePersonName}"
-                }
-                val finalJpgName = "${finalNameBase}.jpeg"
-                val finalPdfName = "${finalNameBase}.pdf"
 
                 var uploadParentId = folderId
                 val subFolderName = targetSubfolder.value.trim()
                 if (subFolderName.isNotEmpty()) {
                     _statusMessage.value = "Creating/finding target folder: $subFolderName..."
-                    val subFolderId = GoogleDriveClient.getOrCreateFolder(obtainedToken, subFolderName, folderId)
-                    if (subFolderId != null) {
-                        uploadParentId = subFolderId
-                    }
+                    updateQueueStatus(queueId, "Finding target folder: $subFolderName...")
+                    uploadParentId = getCachedOrFetchSubFolder(obtainedToken, subFolderName, folderId)
                 }
 
                 var isJpgUploaded = false
@@ -668,29 +1493,41 @@ class HomeViewModel(
 
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                     _statusMessage.value = "Uploading compressed image to Google Drive..."
-                    isJpgUploaded = GoogleDriveClient.uploadFile(
-                        accessToken = obtainedToken,
-                        file = pending.compressedFile,
-                        mimeType = "image/jpeg",
-                        fileName = finalJpgName,
-                        parentId = uploadParentId
-                    )
+                    updateQueueStatus(queueId, "Uploading image standard file...")
+                    isJpgUploaded = retryIO(times = 3) {
+                        GoogleDriveClient.uploadFile(
+                            accessToken = obtainedToken,
+                            file = pending.compressedFile,
+                            mimeType = "image/jpeg",
+                            fileName = finalJpgName,
+                            parentId = uploadParentId
+                        )
+                    }
                 }
 
                 if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
                     _statusMessage.value = "Generating and structuring PDF..."
-                    val pdfFile = File(context.cacheDir, "${System.currentTimeMillis().hashCode()}_pdf.pdf")
+                    updateQueueStatus(queueId, "Generating structured PDF...")
+                    val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
                     try {
-                        ImageProcessor.convertToPdf(pending.compressedFile, pdfFile, targetSizeKb.value)
+                        if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
+                            ImageProcessor.convertToMultiPagePdf(pending.pageFiles, pdfFile, targetSizeKb.value)
+                        } else {
+                            ImageProcessor.convertToPdf(pending.compressedFile, pdfFile, targetSizeKb.value)
+                        }
+                        ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
 
                         _statusMessage.value = "Uploading structured PDF to Google Drive..."
-                        isPdfUploaded = GoogleDriveClient.uploadFile(
-                            accessToken = obtainedToken,
-                            file = pdfFile,
-                            mimeType = "application/pdf",
-                            fileName = finalPdfName,
-                            parentId = uploadParentId
-                        )
+                        updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                        isPdfUploaded = retryIO(times = 3) {
+                            GoogleDriveClient.uploadFile(
+                                accessToken = obtainedToken,
+                                file = pdfFile,
+                                mimeType = "application/pdf",
+                                fileName = finalPdfName,
+                                parentId = uploadParentId
+                            )
+                        }
                     } finally {
                         try { pdfFile.delete() } catch (ep: Exception) {}
                     }
@@ -703,25 +1540,26 @@ class HomeViewModel(
                 val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
                 val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
 
-                // Save to local DB as reference
-                val localCopy = File(context.filesDir, finalJpgName)
-                pending.compressedFile.copyTo(localCopy, overwrite = true)
-                
-                database.documentDao().insertDocument(
-                    DocumentEntity(
-                        fileName = finalJpgName,
-                        personName = checkedPersonName,
-                        documentType = checkedDocumentType,
-                        localFilePath = localCopy.absolutePath,
-                        timestamp = System.currentTimeMillis(),
-                        isUploaded = overallSuccess,
-                        drivePath = if (overallSuccess) builtDrivePath else null
-                    )
-                )
+                if (overallSuccess && insertId != -1L) {
+                    try {
+                        val updatedEntity = DocumentEntity(
+                            id = insertId.toInt(),
+                            fileName = dbFileName,
+                            personName = checkedPersonName,
+                            documentType = checkedDocumentType,
+                            localFilePath = localCopy.absolutePath,
+                            timestamp = System.currentTimeMillis(),
+                            isUploaded = true,
+                            drivePath = builtDrivePath
+                        )
+                        database.documentDao().updateDocument(updatedEntity)
+                        uploadDocToFirestoreAndStorage(localCopy, updatedEntity)
+                    } catch (eup: Exception) {
+                        eup.printStackTrace()
+                    }
+                }
 
-                fetchDriveFiles(context)
-
-                _statusMessage.value = if (overallSuccess) {
+                val msg = if (overallSuccess) {
                     "Success! Saved into your Google Drive"
                 } else if (isJpgUploaded) {
                     "Uploaded Image to Google Drive, PDF upload failed"
@@ -730,13 +1568,35 @@ class HomeViewModel(
                 } else {
                     "Saved locally (Drive Upload Failed)"
                 }
+                _statusMessage.value = msg
+                updateQueueStatus(queueId, if (overallSuccess) "Completed" else "Saved locally (Drive fail)")
+                
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(3000)
+                    if (_statusMessage.value == msg) {
+                        _statusMessage.value = ""
+                    }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _statusMessage.value = "Error uploading to Drive: ${e.message}"
+                val errMsg = "Error uploading to Drive: ${e.message}. Saved locally."
+                _statusMessage.value = errMsg
+                updateQueueStatus(queueId, "Saved locally (Drive fail)")
                 obtainedToken?.let { invalidateCachedToken(context, it) }
+                
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(4000)
+                    if (_statusMessage.value == errMsg) {
+                        _statusMessage.value = ""
+                    }
+                }
             } finally {
                 _isProcessing.value = false
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
+                pending.pageFiles?.forEach { file ->
+                    try { file.delete() } catch (e: Exception) {}
+                }
+                fetchDriveFiles(context)
             }
         }
     }
@@ -747,160 +1607,275 @@ class HomeViewModel(
         compressedFile: File,
         checkedPersonName: String,
         checkedDocumentType: String,
-        format: UploadFormat
+        format: UploadFormat,
+        existingDocId: Int? = null,
+        pageFiles: List<File>? = null
     ) {
         var obtainedToken: String? = null
+        var finalJpgName = ""
+        var finalPdfName = ""
+        var localCopy: File? = null
+        var oldJpgName: String? = null
+        var oldPdfName: String? = null
+
         try {
-            updateQueueStatus(queueId, "Authorizing Google Drive...")
-            
-            val email = settingsRepository.googleEmail.first()
-            val folderId = settingsRepository.driveFolderId.first()
-            
-            if (email.isNullOrEmpty()) {
-                updateQueueStatus(queueId, "Failed: Sign-In required")
-                return
-            }
-            
-            obtainedToken = getAccessToken(context, email)
-            if (obtainedToken == null) {
-                updateQueueStatus(queueId, "Failed: Sign-In required")
-                return
+            val isRetry = existingDocId != null
+            if (isRetry) {
+                val existingDoc = database.documentDao().getAllDocuments().first().find { it.id == existingDocId }
+                if (existingDoc != null) {
+                    if (existingDoc.fileName.endsWith(".pdf", ignoreCase = true)) {
+                        oldPdfName = existingDoc.fileName
+                        oldJpgName = existingDoc.fileName.replace(".pdf", ".jpeg").replace(".PDF", ".jpeg")
+                    } else {
+                        oldJpgName = existingDoc.fileName
+                        oldPdfName = existingDoc.fileName.replace(".jpeg", ".pdf").replace(".jpg", ".pdf")
+                    }
+                    localCopy = File(existingDoc.localFilePath)
+                }
             }
 
             val safePersonName = checkedPersonName.replace(" ", "_").trim()
             val safeDocumentType = checkedDocumentType.replace(" ", "_").trim()
+            val suffixId = java.util.UUID.randomUUID().toString().take(4)
             val finalNameBase = if (nameBeforeType.value) {
-                "${safePersonName}_${safeDocumentType}"
+                "${safePersonName}_${safeDocumentType}_$suffixId"
             } else {
-                "${safeDocumentType}_${safePersonName}"
+                "${safeDocumentType}_${safePersonName}_$suffixId"
             }
-            val finalJpgName = "${finalNameBase}.jpeg"
-            val finalPdfName = "${finalNameBase}.pdf"
-
-            val subFolderName = targetSubfolder.value.trim()
-
-            var uploadParentId = folderId
-            var isJpgUploaded = false
-            var isPdfUploaded = false
-
-            var tokenAttempts = 0
-            val maxTokenAttempts = 2
-
-            while (tokenAttempts < maxTokenAttempts) {
+            finalJpgName = "${finalNameBase}.jpeg"
+            finalPdfName = "${finalNameBase}.pdf"
+            
+            val safeLocalCopy = localCopy ?: File(context.filesDir, finalJpgName)
+            if (localCopy == null || localCopy.absolutePath != safeLocalCopy.absolutePath) {
                 try {
-                    val token = obtainedToken ?: break
-                    
-                    if (subFolderName.isNotEmpty()) {
-                        updateQueueStatus(queueId, "Locating subfolder: $subFolderName...")
-                        val subFolderId = retryIO(times = 3) {
-                            GoogleDriveClient.getOrCreateFolder(token, subFolderName, folderId)
-                        }
-                        if (subFolderId != null) {
-                            uploadParentId = subFolderId
-                        }
-                    }
-
+                    compressedFile.copyTo(safeLocalCopy, overwrite = true)
                     if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                        updateQueueStatus(queueId, "Uploading image standard file...")
-                        isJpgUploaded = retryIO(times = 3) {
-                            GoogleDriveClient.uploadFile(
-                                accessToken = token,
-                                file = compressedFile,
-                                mimeType = "image/jpeg",
-                                fileName = finalJpgName,
-                                parentId = uploadParentId
-                            )
-                        }
+                        ImageProcessor.exportToPublicDocuments(context, safeLocalCopy, finalJpgName, "image/jpeg")
+                    }
+                } catch (ecop: Exception) {
+                    ecop.printStackTrace()
+                }
+            }
+            val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
+
+            // Insert or Update local DB
+            val insertId = try {
+                if (existingDocId != null) {
+                    existingDocId.toLong()
+                } else {
+                    val newId = database.documentDao().insertDocument(
+                        DocumentEntity(
+                            fileName = dbFileName,
+                            personName = checkedPersonName,
+                            documentType = checkedDocumentType,
+                            localFilePath = safeLocalCopy.absolutePath,
+                            timestamp = System.currentTimeMillis(),
+                            isUploaded = false,
+                            drivePath = null
+                        )
+                    )
+                    val newEntity = DocumentEntity(
+                        id = newId.toInt(),
+                        fileName = dbFileName,
+                        personName = checkedPersonName,
+                        documentType = checkedDocumentType,
+                        localFilePath = safeLocalCopy.absolutePath,
+                        timestamp = System.currentTimeMillis(),
+                        isUploaded = false,
+                        drivePath = null
+                    )
+                    uploadDocToFirestoreAndStorage(safeLocalCopy, newEntity)
+                    newId
+                }
+            } catch (edb: Exception) {
+                edb.printStackTrace()
+                existingDocId?.toLong() ?: -1L
+            }
+
+            updateQueueStatus(queueId, "Authorizing Google Drive...")
+            
+            val email = settingsRepository.googleEmail.first()
+            val folderId = settingsRepository.driveFolderId.first()
+            val subFolderName = targetSubfolder.value.trim()
+            
+            if (email.isNullOrEmpty()) {
+                updateQueueStatus(queueId, "Saved locally (Sign-In required)")
+                fetchDriveFiles(context)
+                return
+            }
+
+            var uploadSuccess = false
+            var attempts = 0
+            val maxAttempts = 3
+
+            while (!uploadSuccess && attempts < maxAttempts) {
+                attempts++
+                if (attempts > 1) {
+                    updateQueueStatus(queueId, "Drive upload failed. Auto-retrying (Attempt $attempts of $maxAttempts)...")
+                    kotlinx.coroutines.delay(5000L)
+                }
+
+                backgroundUploadMutex.lock()
+                try {
+                    obtainedToken = getAccessToken(context, email)
+                    if (obtainedToken == null) {
+                        updateQueueStatus(queueId, "Saved locally (Token failed)")
+                        fetchDriveFiles(context)
+                        continue
                     }
 
-                    if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                        updateQueueStatus(queueId, "Generating structured PDF...")
-                        val pdfFile = File(context.cacheDir, "${System.currentTimeMillis().hashCode()}_pdf.pdf")
+                    var uploadParentId = folderId
+                    var isJpgUploaded = false
+                    var isPdfUploaded = false
+
+                    var tokenAttempts = 0
+                    val maxTokenAttempts = 2
+
+                    while (tokenAttempts < maxTokenAttempts) {
                         try {
-                            ImageProcessor.convertToPdf(compressedFile, pdfFile, targetSizeKb.value)
-
-                            updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                            isPdfUploaded = retryIO(times = 3) {
-                                GoogleDriveClient.uploadFile(
-                                    accessToken = token,
-                                    file = pdfFile,
-                                    mimeType = "application/pdf",
-                                    fileName = finalPdfName,
-                                    parentId = uploadParentId
-                                )
+                            val token = obtainedToken ?: break
+                            
+                            if (subFolderName.isNotEmpty()) {
+                                updateQueueStatus(queueId, "Locating subfolder: $subFolderName...")
+                                uploadParentId = getCachedOrFetchSubFolder(token, subFolderName, folderId)
                             }
-                        } finally {
-                            try { pdfFile.delete() } catch (ed: Exception) {}
-                        }
-                    }
 
-                    break
-
-                } catch (e: Exception) {
-                    val errorMsg = e.message ?: ""
-                    android.util.Log.e("HomeViewModel", "Background upload try failed: $errorMsg", e)
-                    
-                    val isAuthError = errorMsg.contains("401") || 
-                                      errorMsg.contains("unauthorized", ignoreCase = true) || 
-                                      errorMsg.contains("token", ignoreCase = true) || 
-                                      errorMsg.contains("auth", ignoreCase = true)
-                    
-                    if (isAuthError && tokenAttempts < maxTokenAttempts - 1) {
-                        tokenAttempts++
-                        updateQueueStatus(queueId, "Token expired. Refreshing...")
-                        
-                        obtainedToken?.let { staleToken ->
-                            withContext(Dispatchers.IO) {
-                                try {
-                                    com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, staleToken)
-                                } catch (ex: Exception) {
-                                    ex.printStackTrace()
+                            if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
+                                updateQueueStatus(queueId, "Uploading image standard file...")
+                                isJpgUploaded = retryIO(times = 3) {
+                                    GoogleDriveClient.uploadFile(
+                                        accessToken = token,
+                                        file = safeLocalCopy,
+                                        mimeType = "image/jpeg",
+                                        fileName = finalJpgName,
+                                        parentId = uploadParentId,
+                                        oldFileName = oldJpgName
+                                    )
                                 }
                             }
+
+                            if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                                updateQueueStatus(queueId, "Generating structured PDF...")
+                                val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
+                                try {
+                                    if (pageFiles != null && pageFiles.isNotEmpty()) {
+                                        ImageProcessor.convertToMultiPagePdf(pageFiles, pdfFile, targetSizeKb.value)
+                                    } else {
+                                        ImageProcessor.convertToPdf(safeLocalCopy, pdfFile, targetSizeKb.value)
+                                    }
+                                    ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
+
+                                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                                    isPdfUploaded = retryIO(times = 3) {
+                                        GoogleDriveClient.uploadFile(
+                                            accessToken = token,
+                                            file = pdfFile,
+                                            mimeType = "application/pdf",
+                                            fileName = finalPdfName,
+                                            parentId = uploadParentId,
+                                            oldFileName = oldPdfName
+                                        )
+                                    }
+                                } finally {
+                                    try { pdfFile.delete() } catch (ed: Exception) {}
+                                }
+                            }
+
+                            break
+
+                        } catch (e: Exception) {
+                            val errorMsg = e.message ?: ""
+                            android.util.Log.e("HomeViewModel", "Background upload try failed: $errorMsg", e)
+                            
+                            val isAuthError = errorMsg.contains("401") || 
+                                              errorMsg.contains("unauthorized", ignoreCase = true) || 
+                                              errorMsg.contains("token", ignoreCase = true) || 
+                                              errorMsg.contains("auth", ignoreCase = true)
+                            
+                            if (isAuthError && tokenAttempts < maxTokenAttempts - 1) {
+                                tokenAttempts++
+                                updateQueueStatus(queueId, "Token expired. Refreshing...")
+                                
+                                obtainedToken?.let { staleToken ->
+                                    withContext(Dispatchers.IO) {
+                                        try {
+                                            com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, staleToken)
+                                        } catch (ex: Exception) {
+                                            ex.printStackTrace()
+                                        }
+                                    }
+                                }
+                                
+                                obtainedToken = getAccessToken(context, email)
+                                if (obtainedToken == null) {
+                                    updateQueueStatus(queueId, "Saved locally (Token refresh failed)")
+                                    break
+                                }
+                            } else {
+                                throw e
+                            }
                         }
-                        
-                        obtainedToken = getAccessToken(context, email)
-                        if (obtainedToken == null) {
-                            updateQueueStatus(queueId, "Failed: Refresh failed")
-                            return
-                        }
-                    } else {
-                        throw e
                     }
+
+                    val overallSuccess = if (format == UploadFormat.BOTH) isJpgUploaded && isPdfUploaded 
+                                         else if (format == UploadFormat.JPEG) isJpgUploaded
+                                         else isPdfUploaded
+
+                    val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
+                    val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
+
+                    if (overallSuccess) {
+                        if (insertId != -1L) {
+                            try {
+                                val updatedEntity = DocumentEntity(
+                                    id = insertId.toInt(),
+                                    fileName = dbFileName,
+                                    personName = checkedPersonName,
+                                    documentType = checkedDocumentType,
+                                    localFilePath = safeLocalCopy.absolutePath,
+                                    timestamp = System.currentTimeMillis(),
+                                    isUploaded = true,
+                                    drivePath = builtDrivePath
+                                )
+                                database.documentDao().updateDocument(updatedEntity)
+                                uploadDocToFirestoreAndStorage(safeLocalCopy, updatedEntity)
+                            } catch (eup: Exception) {
+                                eup.printStackTrace()
+                            }
+                        }
+                        fetchDriveFiles(context)
+                        updateQueueStatus(queueId, "Completed")
+                        uploadSuccess = true
+                    } else {
+                        updateQueueStatus(queueId, "Saved locally (Drive fail)")
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    val msg = e.message ?: "Unknown error"
+                    updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})")
+                    obtainedToken?.let { invalidateCachedToken(context, it) }
+                } finally {
+                    backgroundUploadMutex.unlock()
                 }
             }
 
-            val overallSuccess = if (format == UploadFormat.BOTH) isJpgUploaded && isPdfUploaded 
-                                 else if (format == UploadFormat.JPEG) isJpgUploaded
-                                 else isPdfUploaded
+            if (!uploadSuccess) {
+                showUploadFailedNotification(context, checkedPersonName, checkedDocumentType)
+            }
 
-            val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
-            val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
-
-            val localCopy = File(context.filesDir, finalJpgName)
-            compressedFile.copyTo(localCopy, overwrite = true)
-            
-            database.documentDao().insertDocument(
-                DocumentEntity(
-                    fileName = finalJpgName,
-                    personName = checkedPersonName,
-                    documentType = checkedDocumentType,
-                    localFilePath = localCopy.absolutePath,
-                    timestamp = System.currentTimeMillis(),
-                    isUploaded = overallSuccess,
-                    drivePath = if (overallSuccess) builtDrivePath else null
-                )
-            )
-
-            fetchDriveFiles(context)
-
-            updateQueueStatus(queueId, if (overallSuccess) "Completed" else "Saved locally (Drive fail)")
         } catch (e: Exception) {
             e.printStackTrace()
-            updateQueueStatus(queueId, "Failed: ${e.localizedMessage ?: e.message}")
+            val msg = e.message ?: "Unknown error"
+            updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})")
             obtainedToken?.let { invalidateCachedToken(context, it) }
+            showUploadFailedNotification(context, checkedPersonName, checkedDocumentType)
         } finally {
-            try { compressedFile.delete() } catch (ex: Exception) {}
+            if (existingDocId == null) {
+                try { compressedFile.delete() } catch (ex: Exception) {}
+                pageFiles?.forEach { file ->
+                    try { file.delete() } catch (ex: Exception) {}
+                }
+            }
         }
     }
 
@@ -924,9 +1899,130 @@ class HomeViewModel(
         return block()
     }
 
+    fun retryUpload(context: Context, docIds: Set<Int>) {
+        viewModelScope.launch {
+            val docs = database.documentDao().getAllDocuments().first()
+            val toUpload = docs.filter { it.id in docIds && !it.isUploaded }
+            
+            for (doc in toUpload) {
+                val file = File(doc.localFilePath)
+                if (!file.exists()) continue
+                
+                val queueId = java.util.UUID.randomUUID().toString()
+                _activeQueue.update { it + QueueItem(
+                    id = queueId,
+                    personName = doc.personName,
+                    documentType = doc.documentType,
+                    status = "Retrying upload...",
+                    format = if (doc.fileName.endsWith(".pdf", ignoreCase = true)) UploadFormat.PDF else UploadFormat.JPEG
+                ) }
+                
+                executeBackgroundUpload(
+                    context = context,
+                    queueId = queueId,
+                    compressedFile = file,
+                    checkedPersonName = doc.personName,
+                    checkedDocumentType = doc.documentType, 
+                    format = if (doc.fileName.endsWith(".pdf", ignoreCase = true)) UploadFormat.PDF else UploadFormat.JPEG,
+                    existingDocId = doc.id
+                )
+            }
+        }
+    }
+
+    fun mergeDocumentsToPdf(context: Context, docIds: Set<Int>, fileName: String, folderId: String?, folderName: String, targetSizeKb: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val queueId = java.util.UUID.randomUUID().toString()
+            try {
+                val docs = database.documentDao().getAllDocuments().first()
+                val selectedDocs = docs.filter { it.id in docIds }.sortedBy { it.timestamp }
+                
+                if (selectedDocs.isEmpty()) return@launch
+                
+                _statusMessage.value = "Merging documents to PDF..."
+                _isProcessing.value = true
+                
+                _activeQueue.update { it + QueueItem(
+                    id = queueId,
+                    personName = "Merged",
+                    documentType = "PDF",
+                    status = "Starting...",
+                    format = UploadFormat.PDF
+                )}
+                
+                val imagePaths = selectedDocs.filter { 
+                    it.localFilePath.endsWith(".jpeg", ignoreCase = true) || it.localFilePath.endsWith(".jpg", ignoreCase = true)
+                }.map { it.localFilePath }
+                
+                if (imagePaths.isEmpty()) {
+                    _statusMessage.value = "No images selected to merge."
+                    _isProcessing.value = false
+                    updateQueueStatus(queueId, "Failed: No images")
+                    return@launch
+                }
+                
+                val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
+                val pdfFile = File(context.cacheDir, "merged_${java.util.UUID.randomUUID()}.pdf")
+                val filesToMerge = imagePaths.map { File(it) }
+                
+                updateQueueStatus(queueId, "Generating PDF...")
+                ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb)
+                
+                val safeLocalCopy = File(context.filesDir, "merged_${java.util.UUID.randomUUID()}.pdf")
+                pdfFile.inputStream().use { input ->
+                    safeLocalCopy.outputStream().use { output -> input.copyTo(output) }
+                }
+                
+                ImageProcessor.exportToPublicDocuments(context, safeLocalCopy, finalFileName, "application/pdf")
+                
+                var isUploaded = false
+                val email = googleEmail.value
+                val token = if (email != null) getAccessToken(context, email) else null
+                if (token != null) {
+                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                    val uploadParentId = folderId ?: driveFolderId.value
+                    
+                    isUploaded = retryIO(times = 3) {
+                        GoogleDriveClient.uploadFile(
+                            accessToken = token,
+                            file = pdfFile,
+                            mimeType = "application/pdf",
+                            fileName = finalFileName,
+                            parentId = uploadParentId
+                        )
+                    }
+                }
+                
+                val mergedEntity = DocumentEntity(
+                    fileName = finalFileName,
+                    personName = "Merged",
+                    documentType = "PDF",
+                    localFilePath = safeLocalCopy.absolutePath,
+                    isUploaded = isUploaded,
+                    timestamp = System.currentTimeMillis()
+                )
+                val id = database.documentDao().insertDocument(mergedEntity)
+                if (id != -1L) {
+                    uploadDocToFirestoreAndStorage(safeLocalCopy, mergedEntity.copy(id = id.toInt()))
+                }
+                
+                updateQueueStatus(queueId, "Completed - Merged successfully!")
+                _statusMessage.value = "Merged successfully!"
+                updatePublicFolderSize()
+                
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _statusMessage.value = "Merge failed: ${e.message}"
+                updateQueueStatus(queueId, "Failed: ${e.message}")
+            } finally {
+                _isProcessing.value = false
+            }
+        }
+    }
+
     fun uploadInBackground(context: Context, personName: String, documentType: String, format: UploadFormat) {
-        val pending = _pendingDocument.value ?: return
-        _pendingDocument.value = null // dismiss dialog immediately to allow continued scanning
+        val pending = _pendingDocuments.value.firstOrNull() ?: return
+        _pendingDocuments.update { it.drop(1) } // dismiss dialog immediately to allow continued scanning
 
         val checkedPersonName = if (personName.trim().isEmpty()) {
             "Client_${System.currentTimeMillis() % 100000}"
@@ -939,25 +2035,36 @@ class HomeViewModel(
             documentType.trim()
         }
 
-        val queueId = java.util.UUID.randomUUID().toString()
+        val queueId = pending.queueId
 
-        val initialItem = QueueItem(
-            id = queueId,
-            personName = checkedPersonName,
-            documentType = checkedDocumentType,
-            format = format,
-            status = "Queued..."
-        )
-        _activeQueue.value = _activeQueue.value + initialItem
+        // Update existing queue item status
+        _activeQueue.update { it.map { item ->
+            if (item.id == queueId) item.copy(
+                personName = checkedPersonName,
+                documentType = checkedDocumentType,
+                format = format,
+                status = "Queued..."
+            ) else item
+        } }
 
         viewModelScope.launch {
-            executeBackgroundUpload(context, queueId, pending.compressedFile, checkedPersonName, checkedDocumentType, format)
+            executeBackgroundUpload(
+                context,
+                queueId,
+                pending.compressedFile,
+                checkedPersonName,
+                checkedDocumentType,
+                format,
+                pageFiles = pending.pageFiles
+            )
         }
     }
 
     private fun updateQueueStatus(id: String, status: String) {
-        _activeQueue.value = _activeQueue.value.map { item ->
-            if (item.id == id) item.copy(status = status) else item
+        _activeQueue.update { currentList ->
+            currentList.map { item ->
+                if (item.id == id) item.copy(status = status) else item
+            }
         }
     }
 
@@ -1071,11 +2178,14 @@ class HomeViewModel(
         if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") return null
 
         val prompt = """
-            Analyze this document image. Identify the type of document (e.g., Aadhaar, PAN Card, Passport, Bill) and the primary person's name on it.
+            You are an expert document OCR engine. Analyze this document image and classify it precisely.
+            Detect common Indian IDs like Voter ID, Aadhaar Card, PAN Card, Passport, Driving License, or generic ones like Bill, Marksheet.
+            Crucially distinguish between Voter ID (Election Commission, EPIC) and Aadhaar (UIDAI, Unique Identification).
+            Extract the primary person's exact name on the document. Do not capture labels like "Name:", "Father's Name:", or structural text.
             Return a JSON object strictly matching this schema:
             {
                 "personName": "Extracted Name",
-                "documentType": "Extracted Document Type"
+                "documentType": "Extracted Document Type (e.g. Voter ID, Aadhaar Card)"
             }
         """.trimIndent()
 
@@ -1139,7 +2249,26 @@ class HomeViewModel(
         suspendCancellableCoroutine { continuation ->
             var bitmap: Bitmap? = null
             try {
-                bitmap = BitmapFactory.decodeFile(imageFile.absolutePath)
+                val options = BitmapFactory.Options()
+                options.inJustDecodeBounds = true
+                BitmapFactory.decodeFile(imageFile.absolutePath, options)
+                
+                var inSampleSize = 1
+                val reqWidth = 1024
+                val reqHeight = 1024
+                val height = options.outHeight
+                val width = options.outWidth
+                if (height > reqHeight || width > reqWidth) {
+                    val halfHeight = height / 2
+                    val halfWidth = width / 2
+                    while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+                        inSampleSize *= 2
+                    }
+                }
+                options.inSampleSize = inSampleSize
+                options.inJustDecodeBounds = false
+                
+                bitmap = BitmapFactory.decodeFile(imageFile.absolutePath, options)
                 if (bitmap == null) {
                     continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
                     return@suspendCancellableCoroutine
@@ -1150,19 +2279,19 @@ class HomeViewModel(
                     .addOnSuccessListener { visionText ->
                         if (continuation.isActive) {
                             val fullText = visionText.text
-                            val result = extractLocalDetails(fullText)
+                            val result = try { extractLocalDetails(fullText) } catch (e: Exception) { DocumentAnalysisResult("Unknown", "Document") }
                             continuation.resume(result)
                         }
-                        try { bitmap.recycle() } catch (ex: Exception) {}
+                        try { bitmap?.recycle() } catch (ex: Exception) {}
                     }
                     .addOnFailureListener { e ->
                         e.printStackTrace()
                         if (continuation.isActive) {
                             continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
                         }
-                        try { bitmap.recycle() } catch (ex: Exception) {}
+                        try { bitmap?.recycle() } catch (ex: Exception) {}
                     }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 e.printStackTrace()
                 if (continuation.isActive) {
                     continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
@@ -1177,105 +2306,157 @@ class HomeViewModel(
         var documentType = "Document"
         
         val lowercaseText = fullText.lowercase()
-        
-        // A. Smart detection of Aadhaar Card via 12-digit UID spacing patterns AND language/institution checks
-        val uidPattern = Regex("\\b\\d{4}[\\s-]\\d{4}[\\s-]\\d{4}\\b")
-        val isAadhaarKeyword = lowercaseText.contains("aadhaar") || 
-                              lowercaseText.contains("aadhar") || 
-                              lowercaseText.contains("adhar") || 
-                              lowercaseText.contains("unique identification") ||
-                              lowercaseText.contains("enrollment ") ||
-                              lowercaseText.contains("yob:") || 
-                              lowercaseText.contains("dob:") ||
-                              lowercaseText.contains("male") ||
-                              lowercaseText.contains("female") ||
-                              lowercaseText.contains("आधार")
-                              
-        if (uidPattern.containsMatchIn(fullText) || isAadhaarKeyword) {
-            documentType = "Aadhaar Card"
-        } 
-        // B. Smart detection of PAN Card via alphanumeric Permanent Account pattern AND tax keywords
-        else if (lowercaseText.contains("permanent account") || 
-                 lowercaseText.contains("tax department") || 
-                 lowercaseText.contains("income tax") ||
-                 Regex("[a-zA-Z]{5}[0-9]{4}[a-zA-Z]").containsMatchIn(fullText)) {
-            documentType = "PAN Card"
-        } 
-        // C. Smart detection of Driving License
-        else if (lowercaseText.contains("driving") || 
-                 lowercaseText.contains("licence") || 
-                 lowercaseText.contains("license") || 
-                 lowercaseText.contains("dl no") || 
-                 lowercaseText.contains("transport department") ||
-                 Regex("\\b[A-Za-Z]{2}[- ]?[0-9]{2}").containsMatchIn(fullText)) {
-            documentType = "Driving License"
-        } 
-        // D. Smart detection of Voter ID Card
-        else if (lowercaseText.contains("voter") || 
-                 lowercaseText.contains("election") || 
-                 lowercaseText.contains("commission of india") || 
-                 lowercaseText.contains("elector photo") || 
-                 lowercaseText.contains("epic") ||
-                 Regex("[a-zA-Z]{3}[0-9]{7}").containsMatchIn(fullText)) {
-            documentType = "Voter ID"
-        } 
-        // E. Smart detection of Passport
-        else if (lowercaseText.contains("passport") || 
-                 lowercaseText.contains("republic of india") || 
-                 lowercaseText.contains("paspot") ||
-                 Regex("\\b[a-zA-Z][0-9]{7}\\b").containsMatchIn(fullText)) {
-            documentType = "Passport"
-        } 
-        // F. Academy Marksheet or certificates
-        else if (lowercaseText.contains("marksheet") || 
-                 lowercaseText.contains("mark sheet") || 
-                 lowercaseText.contains("school certificate") || 
-                 lowercaseText.contains("board of school") || 
-                 lowercaseText.contains("marks statement") || 
-                 lowercaseText.contains("roll no") || 
-                 lowercaseText.contains("examination")) {
-            documentType = "Marksheet"
-        } 
-        // G. Ration Card
-        else if (lowercaseText.contains("ration card") || lowercaseText.contains("ration")) {
-            documentType = "Ration Card"
-        }
-        
-        // 2. Exact on-device name extraction logic
         val lines = fullText.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-        val nameIndicators = listOf("name", "full name", "नाम", "holder name", "name of holder", "card holder")
+        
+        // 1. Smart Scoring Based Document Detection
+        var aadhaarScore = 0
+        var panScore = 0
+        var voterScore = 0
+        var dlScore = 0
+        var passportScore = 0
+        var marksheetScore = 0
+        var rationScore = 0
+
+        if (Regex("\\b\\d{4}[\\s-]\\d{4}[\\s-]\\d{4}\\b").containsMatchIn(fullText)) aadhaarScore += 10
+        if (lowercaseText.contains("aadhaar") || lowercaseText.contains("aadhar") || lowercaseText.contains("adhar")) aadhaarScore += 10
+        if (lowercaseText.contains("unique identification") || lowercaseText.contains("uidai")) aadhaarScore += 5
+        if (fullText.contains("आधार")) aadhaarScore += 4
+        if (lowercaseText.contains("mera aadhaar") || lowercaseText.contains("meri pehchaan")) aadhaarScore += 4
+
+        if (Regex("\\b[A-Za-z]{5}[0-9]{4}[A-Za-z]\\b").containsMatchIn(fullText)) panScore += 10
+        if (lowercaseText.contains("permanent account number")) panScore += 10
+        if (lowercaseText.contains("income tax department")) panScore += 10
+
+        if (lowercaseText.contains("election commission of india")) voterScore += 10
+        if (lowercaseText.contains("elector photo identity card") || lowercaseText.contains("epic")) voterScore += 10
+        if (lowercaseText.contains("voter id") || lowercaseText.contains("voter card")) voterScore += 10
+        if (Regex("\\b[A-Za-z]{3}[0-9]{7}\\b").containsMatchIn(fullText)) voterScore += 4 // EPIC
+        if (lowercaseText.contains("निर्वाचन आयोग")) voterScore += 5
+
+        if (lowercaseText.contains("driving licence") || lowercaseText.contains("driving license")) dlScore += 10
+        if (lowercaseText.contains("dl no") || lowercaseText.contains("authorization to drive")) dlScore += 10
+        if (lowercaseText.contains("transport department")) dlScore += 5
+
+        if (lowercaseText.contains("republic of india") && lowercaseText.contains("passport")) passportScore += 10
+        if (lowercaseText.contains("passport no")) passportScore += 10
+
+        if (lowercaseText.contains("marksheet") || lowercaseText.contains("mark sheet") || lowercaseText.contains("marks statement")) marksheetScore += 10
+        if (lowercaseText.contains("board of") && lowercaseText.contains("examination")) marksheetScore += 10
+
+        if (lowercaseText.contains("ration card") || lowercaseText.contains("smart ration card")) rationScore += 10
+        if (lowercaseText.contains("department of food") || lowercaseText.contains("food and civil supplies")) rationScore += 5
+
+        val scores = mapOf(
+            "Aadhaar Card" to aadhaarScore,
+            "PAN Card" to panScore,
+            "Voter ID" to voterScore,
+            "Driving License" to dlScore,
+            "Passport" to passportScore,
+            "Marksheet" to marksheetScore,
+            "Ration Card" to rationScore
+        )
+
+        val bestMatch = scores.maxByOrNull { it.value }
+        if (bestMatch != null && bestMatch.value >= 4) {
+            documentType = bestMatch.key
+        }
+
+        // 2. Exact on-device name extraction logic
         var foundName = ""
         
-        for (i in lines.indices) {
-            val lineLower = lines[i].lowercase()
-            for (ind in nameIndicators) {
-                if (lineLower.startsWith(ind) || lineLower.contains("$ind:") || lineLower.contains("$ind :") || lineLower.contains("$ind=")) {
-                    var afterInd = ""
-                    val idx = lines[i].lowercase().indexOf(ind)
-                    if (idx != -1) {
-                        afterInd = lines[i].substring(idx + ind.length).trim(':', '-', ' ', '=', '।', '/')
+        if (documentType == "PAN Card") {
+            for (i in lines.indices) {
+                val lineLower = lines[i].lowercase()
+                if (lineLower.contains("name") && !lineLower.contains("father")) {
+                    if (i + 1 < lines.size) {
+                        val potentialName = lines[i + 1]
+                        if (isValidName(potentialName) && !isBlacklistedLine(potentialName)) {
+                            foundName = potentialName
+                            break
+                        }
                     }
-                    if (afterInd.length >= 3 && isValidName(afterInd)) {
-                        foundName = afterInd
+                }
+                if (foundName.isEmpty() && lineLower.contains("permanent account number")) {
+                    for(j in Math.max(0, i-4) until i) {
+                        val potentialName = lines[j]
+                        if (isValidName(potentialName) && potentialName.uppercase() == potentialName && !isBlacklistedLine(potentialName)) {
+                            foundName = potentialName
+                        }
+                    }
+                }
+            }
+        } else if (documentType == "Voter ID") {
+            for (i in lines.indices) {
+                val lineLower = lines[i].lowercase()
+                if (lineLower.contains("elector's name") || lineLower.contains("name")) {
+                    val idx = lineLower.indexOf("name")
+                    val after = lines[i].substring(idx + 4).trim(':', '-', ' ', '=', '|', '।')
+                    if (after.length >= 3 && isValidName(after) && !isBlacklistedLine(after)) {
+                        foundName = after
                         break
                     } else if (i + 1 < lines.size) {
-                        val nextLine = lines[i + 1].trim()
-                        if (nextLine.length >= 3 && isValidName(nextLine) && !isBlacklistedLine(nextLine)) {
+                        val nextLine = lines[i+1].trim(':', '-', ' ', '=', '|', '।')
+                        if (isValidName(nextLine) && !isBlacklistedLine(nextLine)) {
                             foundName = nextLine
                             break
                         }
                     }
                 }
             }
-            if (foundName.isNotEmpty()) break
+        } else if (documentType == "Aadhaar Card") {
+            for (i in lines.indices) {
+                val lineLower = lines[i].lowercase()
+                if (lineLower.contains("dob") || lineLower.contains("year of birth") || lineLower.contains("yob")) {
+                    if (i - 1 >= 0) {
+                        val prev = lines[i-1]
+                        if (isValidName(prev) && !isBlacklistedLine(prev)) {
+                            foundName = prev
+                            break
+                        }
+                    }
+                    if (i - 2 >= 0 && foundName.isEmpty()) {
+                         val prev = lines[i-2]
+                         if (isValidName(prev) && !isBlacklistedLine(prev)) {
+                             foundName = prev
+                             break
+                         }
+                    }
+                }
+            }
+        }
+
+        if (foundName.isEmpty()) {
+            val nameIndicators = listOf("elector's name", "name", "full name", "नाम", "holder name", "name of holder", "card holder")
+            for (i in lines.indices) {
+                val lineLower = lines[i].lowercase()
+                for (ind in nameIndicators) {
+                    if (lineLower.startsWith(ind) || lineLower.contains("$ind:") || lineLower.contains("$ind :") || lineLower.contains("$ind=")) {
+                        var afterInd = ""
+                        val idx = lineLower.indexOf(ind)
+                        if (idx != -1) {
+                            afterInd = lines[i].substring(idx + ind.length).trim(':', '-', ' ', '=', '।', '/', '.')
+                        }
+                        if (afterInd.length >= 3 && isValidName(afterInd) && !isBlacklistedLine(afterInd)) {
+                            foundName = afterInd
+                            break
+                        } else if (i + 1 < lines.size) {
+                            val nextLine = lines[i + 1].trim()
+                            if (nextLine.length >= 3 && isValidName(nextLine) && !isBlacklistedLine(nextLine)) {
+                                foundName = nextLine
+                                break
+                            }
+                        }
+                    }
+                }
+                if (foundName.isNotEmpty()) break
+            }
         }
         
-        // Fallback: If indicator not found, let's scan for uppercase lines of length 2-4 words which looks like a person's name
         if (foundName.isEmpty()) {
             for (line in lines) {
                 val cleaned = line.replace(Regex("[^a-zA-Z\\s]"), "").trim()
                 val words = cleaned.split("\\s+".toRegex())
-                if (words.size in 2..4 && cleaned.uppercase() == cleaned && cleaned.length >= 5) {
+                if ((words.size in 2..4) && (cleaned.uppercase() == cleaned) && cleaned.length >= 5) {
                     if (!isBlacklistedLine(cleaned) && isValidName(line)) {
                         foundName = line
                         break
@@ -1302,12 +2483,11 @@ class HomeViewModel(
             return "Unknown"
         }
 
-        // 1. Clean up typical labels prefixing the name (case-insensitive, with or without colons/dashes/spaces) FIRST
         val prefixes = listOf(
             "card holder name", "cardholder name", "name of holder", "holder name", 
             "card holder", "cardholder", "head of family", "relation name", "full name", 
             "father's name", "father name", "mother's name", "mother name", "husband's name",
-            "husband name", "नाम", "name"
+            "husband name", "नाम", "name", "elector's name", "elector name"
         )
         
         for (pref in prefixes) {
@@ -1323,7 +2503,6 @@ class HomeViewModel(
             return "Unknown"
         }
 
-        // 2. Blacklisted exact/substring labels to reject lines which are just instructions or headers
         val blacklist = listOf(
             "card holder", "cardholder", "holder name", "name of holder", "head of family", "father's name", "father name", "father", "mother", "mother's name", "husband", "spouse", "parent", 
             "voter id", "aadhaar", "aadhar", "pan card", "passport", "driving license", "driving licence", "marksheet", "ration card", 
@@ -1339,13 +2518,13 @@ class HomeViewModel(
             }
         }
 
-        // Additional check: if the name is too long or contains lines, or digits, or symbols, it's not a valid name
         if (cleaned.any { it.isDigit() }) return "Unknown"
         val invalidChars = listOf('@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '=', '[', ']', '{', '}', ';', ':', '"', '<', '>', '/', '\\', '|')
         if (cleaned.any { it in invalidChars }) return "Unknown"
         
         val words = cleaned.split("\\s+".toRegex())
-        if (words.size > 5) return "Unknown" // Person names rarely exceed 5 words
+        if (words.size > 5) return "Unknown"
+        if (cleaned.length <= 2) return "Unknown"
 
         return cleaned
     }
@@ -1354,8 +2533,7 @@ class HomeViewModel(
         val typeLower = detectedType.trim().lowercase()
         val textLower = keywordText.lowercase()
 
-        // 1. Explicitly check content keywords first to enforce high-accuracy fallback correction
-        if (typeLower.contains("aadhaar") || typeLower.contains("aadhar") || textLower.contains("aadhaar") || textLower.contains("aadhar") || textLower.contains("unique identification") || textLower.contains("enrollment")) {
+        if (typeLower.contains("aadhaar") || typeLower.contains("aadhar") || textLower.contains("aadhaar") || textLower.contains("aadhar") || textLower.contains("unique identification") || textLower.contains("uidai")) {
             return "Aadhaar Card"
         }
         if (typeLower.contains("pan") || typeLower.contains("permanent account") || textLower.contains("permanent account") || textLower.contains("income tax")) {
@@ -1368,7 +2546,7 @@ class HomeViewModel(
             return "Driving License"
         }
         if (typeLower.contains("voter") || typeLower.contains("election") || typeLower.contains("elector") || typeLower.contains("epic") || typeLower.contains("identity card") || typeLower.contains("identity_card") || textLower.contains("voter") || textLower.contains("election commission") || textLower.contains("epic") || textLower.contains("elector photo")) {
-            return "Voter Card"
+            return "Voter ID"
         }
         if (typeLower.contains("marksheet") || typeLower.contains("mark sheet") || textLower.contains("marksheet") || textLower.contains("mark sheet") || textLower.contains("roll no") || textLower.contains("examination")) {
             return "Marksheet"
@@ -1377,9 +2555,8 @@ class HomeViewModel(
             return "Ration Card"
         }
 
-        // 2. Generic identity mapping: if "identity card" falls through to this point, Map it to Voter Card
         if (typeLower.contains("identity")) {
-            return "Voter Card"
+            return "Voter ID"
         }
 
         return detectedType.trim().split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
@@ -1393,9 +2570,10 @@ class HomeViewModel(
             "state", "district", "union", "authority", "unique", "identification", "school", "board", "voter", "birth", "date", "no",
             "delhi", "mumbai", "kolkata", "chennai", "road", "street", "lane", "floor", "house", "flat", "office", "post", "bazar", "nagar",
             "city", "town", "village", "taluk", "tehsil", "dist", "pin", "code", "phone", "mobile", "tel", "email", "web", "site",
-            "issue", "expiry", "holder", "assembly", "elector", "marksheet", "certificate", "examined", "roll", "marks", "grades"
+            "issue", "expiry", "holder", "assembly", "elector", "marksheet", "certificate", "examined", "roll", "marks", "grades",
+            "uidai", "mera aadhaar", "meri pehchaan", "help@", "www."
         )
-        return blacklists.any { lower.contains(it) }
+        return blacklists.any { lower.contains(it) } || lower.length < 3
     }
 
     private fun isValidName(line: String): Boolean {
@@ -1404,23 +2582,80 @@ class HomeViewModel(
         if (line.any { it in invalidChars }) return false
         val letters = line.filter { it.isLetter() }.length
         val total = line.length
-        return total > 0 && (letters.toDouble() / total.toDouble()) > 0.6
+        return total > 0 && (letters.toDouble() / total.toDouble()) > 0.6 && line.trim().length > 2
     }
 
-    fun clearAllData() {
+    fun clearAllData(deletePublicFiles: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Delete cached files
-                context.cacheDir.listFiles()?.forEach { file ->
-                    if (file.name.contains("scan") || file.name.contains("combined") || file.name.contains("compressed")) {
-                        file.delete()
-                    }
-                }
                 // Wipe Room database
                 database.documentDao().deleteAllDocuments()
+
+                // Delete cached files
+                context.cacheDir.listFiles()?.forEach { file ->
+                    file.deleteRecursively()
+                }
+                
+                context.externalCacheDir?.listFiles()?.forEach { file ->
+                    file.deleteRecursively()
+                }
+
+                // Delete internally saved files
+                context.filesDir.listFiles()?.forEach { file ->
+                    file.deleteRecursively()
+                }
+
+                if (deletePublicFiles) {
+                    // Delete public documents
+                    com.example.data.ImageProcessor.clearPublicDocuments(context)
+                }
+                updatePublicFolderSize()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
+        }
+    }
+
+    private fun showUploadFailedNotification(context: Context, personName: String, docType: String) {
+        val channelId = "upload_failures_channel"
+        val channelName = "Upload Status"
+        val notificationId = (System.currentTimeMillis() % 100000).toInt()
+
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                channelName,
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifications for failed document uploads to Google Drive"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notificationBuilder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Upload Failed")
+            .setContentText("Failed uploading $personName's $docType. Tap to open app and retry manually.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+
+        try {
+            notificationManager.notify(notificationId, notificationBuilder.build())
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }

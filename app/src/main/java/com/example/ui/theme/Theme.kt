@@ -70,8 +70,8 @@ private val DarkColorScheme = darkColorScheme(
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    darkTheme: Boolean = true, // Force dark theme for AMOLED
+    dynamicColor: Boolean = false, // Disable dynamic colors to use our custom pitch black colors
     content: @Composable () -> Unit,
 ) {
     val colorScheme = when {

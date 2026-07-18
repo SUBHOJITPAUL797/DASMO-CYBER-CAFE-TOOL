@@ -20,8 +20,11 @@ interface DocumentDao {
     @Query("SELECT * FROM documents ORDER BY timestamp DESC")
     fun getAllDocuments(): Flow<List<DocumentEntity>>
 
-    @Insert
-    suspend fun insertDocument(document: DocumentEntity)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDocument(document: DocumentEntity): Long
+
+    @Update
+    suspend fun updateDocument(document: DocumentEntity)
 
     @Query("DELETE FROM documents")
     suspend fun deleteAllDocuments()

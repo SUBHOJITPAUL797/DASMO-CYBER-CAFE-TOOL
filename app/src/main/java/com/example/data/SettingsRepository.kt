@@ -20,10 +20,23 @@ class SettingsRepository(private val context: Context) {
     private val ENABLE_AI_ANALYSIS = androidx.datastore.preferences.core.booleanPreferencesKey("enable_ai_analysis")
     private val NAME_BEFORE_TYPE = androidx.datastore.preferences.core.booleanPreferencesKey("name_before_type")
     private val SHOW_CONFIRMATION = androidx.datastore.preferences.core.booleanPreferencesKey("show_confirmation")
+    private val TARGET_SUBFOLDER = stringPreferencesKey("target_subfolder")
+    private val AUTO_ENHANCE_ENABLED = androidx.datastore.preferences.core.booleanPreferencesKey("auto_enhance_enabled")
+    private val USE_A4_FORMAT = androidx.datastore.preferences.core.booleanPreferencesKey("use_a4_format")
 
     val targetSizeKb: Flow<Int> = context.dataStore.data
         .map { preferences ->
             preferences[TARGET_SIZE_KB] ?: 500 // Default 500 KB
+        }
+
+    val autoEnhanceEnabled: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[AUTO_ENHANCE_ENABLED] ?: true // Default to true
+        }
+
+    val useA4Format: Flow<Boolean> = context.dataStore.data
+        .map { preferences ->
+            preferences[USE_A4_FORMAT] ?: true // Default to true
         }
 
     val enableAiAnalysis: Flow<Boolean> = context.dataStore.data
@@ -56,9 +69,26 @@ class SettingsRepository(private val context: Context) {
             preferences[DRIVE_FOLDER_NAME] ?: "My Drive"
         }
 
+    val targetSubfolder: Flow<String> = context.dataStore.data
+        .map { preferences ->
+            preferences[TARGET_SUBFOLDER] ?: ""
+        }
+
     suspend fun setTargetSizeKb(size: Int) {
         context.dataStore.edit { preferences ->
             preferences[TARGET_SIZE_KB] = size
+        }
+    }
+
+    suspend fun setAutoEnhanceEnabled(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[AUTO_ENHANCE_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setUseA4Format(use: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[USE_A4_FORMAT] = use
         }
     }
 
@@ -94,6 +124,12 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { preferences ->
             preferences[DRIVE_FOLDER_ID] = id
             preferences[DRIVE_FOLDER_NAME] = name
+        }
+    }
+
+    suspend fun setTargetSubfolder(subfolder: String) {
+        context.dataStore.edit { preferences ->
+            preferences[TARGET_SUBFOLDER] = subfolder
         }
     }
 }

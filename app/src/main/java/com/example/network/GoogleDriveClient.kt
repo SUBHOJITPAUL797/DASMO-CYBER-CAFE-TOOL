@@ -37,8 +37,9 @@ object GoogleDriveClient {
 
     suspend fun listFolders(accessToken: String, parentId: String = "root"): List<GoogleDriveFolder> = withContext(Dispatchers.IO) {
         val folders = mutableListOf<GoogleDriveFolder>()
-        val q = "'$parentId' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=files(id,name)&pageSize=1000"
+        val effectiveParentId = if (parentId.isEmpty()) "root" else parentId
+        val q = "'$effectiveParentId' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=files(id,name)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
         
         val request = Request.Builder()
             .url(url)
@@ -72,7 +73,7 @@ object GoogleDriveClient {
 
     suspend fun createFolder(accessToken: String, name: String, parentId: String = "root"): String? = withContext(Dispatchers.IO) {
         android.util.Log.d("GoogleDriveClient", "createFolder: name=$name parentId=$parentId")
-        val url = "https://www.googleapis.com/drive/v3/files"
+        val url = "https://www.googleapis.com/drive/v3/files?supportsAllDrives=true"
         val json = JSONObject().apply {
             put("name", name)
             put("mimeType", "application/vnd.google-apps.folder")
@@ -100,14 +101,90 @@ object GoogleDriveClient {
         }
     }
 
-    suspend fun getOrCreateFolder(accessToken: String, name: String, parentId: String = "root"): String? {
+    suspend fun getOrCreateFolder(accessToken: String, name: String, parentId: String = "root"): String? = withContext(Dispatchers.IO) {
         android.util.Log.d("GoogleDriveClient", "getOrCreateFolder: name=$name parentId=$parentId")
-        val existing = listFolders(accessToken, parentId)
-        val found = existing.find { it.name.equals(name, ignoreCase = true) }
-        if (found != null) {
-            return found.id
+        
+        val trimmedName = name.trim()
+        if (trimmedName.isEmpty()) {
+            return@withContext if (parentId.isEmpty()) "root" else parentId
         }
-        return createFolder(accessToken, name, parentId)
+        
+        val effectiveParentId = if (parentId.isEmpty()) "root" else parentId
+        
+        // 1. Direct Search Query for exact folder name & parent (Bulletproof, Shared-drive safe, Case-insensitive match)
+        try {
+            val escapedName = trimmedName.replace("'", "\\'")
+            val q = "'$effectiveParentId' in parents and name = '$escapedName' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=files(id,name)&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true"
+            
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("Authorization", "Bearer $accessToken")
+                .build()
+                
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val json = JSONObject(body)
+                    val filesArray = json.optJSONArray("files")
+                    if (filesArray != null && filesArray.length() > 0) {
+                        for (i in 0 until filesArray.length()) {
+                            val item = filesArray.getJSONObject(i)
+                            val folderName = item.optString("name", "")
+                            if (folderName.trim().equals(trimmedName, ignoreCase = true)) {
+                                val foundId = item.getString("id")
+                                android.util.Log.d("GoogleDriveClient", "getOrCreateFolder: Found existing folder directly via name match: $trimmedName (ID: $foundId)")
+                                return@withContext foundId
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GoogleDriveClient", "Direct query failed, falling back to listFolders", e)
+        }
+        
+        // 2. Fallback: List folders and search locally (in case of query quirks)
+        try {
+            val existing = listFolders(accessToken, effectiveParentId)
+            val found = existing.find { it.name.trim().equals(trimmedName, ignoreCase = true) }
+            if (found != null) {
+                android.util.Log.d("GoogleDriveClient", "getOrCreateFolder: Found existing folder via local list match: $trimmedName (ID: ${found.id})")
+                return@withContext found.id
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GoogleDriveClient", "Fallback listFolders search failed", e)
+        }
+        
+        // 3. Not found, create it
+        android.util.Log.d("GoogleDriveClient", "getOrCreateFolder: Folder '$trimmedName' not found. Creating a new folder.")
+        return@withContext createFolder(accessToken, trimmedName, effectiveParentId)
+    }
+
+    suspend fun findFileByName(accessToken: String, parentId: String, fileName: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val q = "'$parentId' in parents and name = '${fileName.replace("'", "\\'")}' and trashed = false"
+            val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("Authorization", "Bearer $accessToken")
+                .build()
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val json = JSONObject(body)
+                    val filesArray = json.optJSONArray("files")
+                    if (filesArray != null && filesArray.length() > 0) {
+                        return@withContext filesArray.getJSONObject(0).getString("id")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        null
     }
 
     suspend fun uploadFile(
@@ -115,12 +192,20 @@ object GoogleDriveClient {
         file: File,
         mimeType: String,
         fileName: String,
-        parentId: String
+        parentId: String,
+        oldFileName: String? = null
     ): Boolean = withContext(Dispatchers.IO) {
-        val url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
+        val existingFileId = findFileByName(accessToken, parentId, oldFileName ?: fileName)
+        
+        val url = if (existingFileId != null) {
+            "https://www.googleapis.com/upload/drive/v3/files/$existingFileId?uploadType=multipart&supportsAllDrives=true"
+        } else {
+            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true"
+        }
+        
         val metadata = JSONObject().apply {
             put("name", fileName)
-            if (parentId.isNotEmpty()) {
+            if (existingFileId == null && parentId.isNotEmpty()) {
                 put("parents", org.json.JSONArray().apply { put(parentId) })
             }
         }
@@ -136,7 +221,7 @@ object GoogleDriveClient {
 
         val request = Request.Builder()
             .url(url)
-            .post(multipartBody)
+            .method(if (existingFileId != null) "PATCH" else "POST", multipartBody)
             .addHeader("Authorization", "Bearer $accessToken")
             .build()
 
@@ -155,7 +240,7 @@ object GoogleDriveClient {
         val q = "'$folderId' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
         // Request fields we care about, including createdTime and webViewLink for detailed presentation
         val fields = "files(id,name,mimeType,size,createdTime,webViewLink)"
-        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=${java.net.URLEncoder.encode(fields, "UTF-8")}&pageSize=1000"
+        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=${java.net.URLEncoder.encode(fields, "UTF-8")}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
         
         val request = Request.Builder()
             .url(url)
