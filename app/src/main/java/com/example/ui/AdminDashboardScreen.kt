@@ -34,7 +34,8 @@ fun AdminDashboardScreen(
     onDecline: (String) -> Unit,
     onToggleApproval: (String, Boolean) -> Unit,
     statusMessage: String,
-    onClearStatus: () -> Unit
+    onClearStatus: () -> Unit,
+    onRunDiagnostics: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(0) } // 0 = Pending, 1 = All Users
     val pendingUsers = allUsers.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
@@ -79,12 +80,22 @@ fun AdminDashboardScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = "Shield",
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(36.dp)
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onRunDiagnostics) {
+                            Icon(
+                                imageVector = Icons.Default.BugReport,
+                                contentDescription = "Run Diagnostics",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = "Shield",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

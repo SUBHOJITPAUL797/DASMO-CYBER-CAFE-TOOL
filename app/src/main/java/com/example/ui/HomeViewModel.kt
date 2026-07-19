@@ -146,7 +146,7 @@ class HomeViewModel(
                     _isAdmin.value = false
                 } else {
                     val normalizedEmail = email.trim().lowercase()
-                    val docRef = firestore.collection("dasmo_doc_scanner").document(normalizedEmail)
+                    val docRef = firestore.collection("users").document("${normalizedEmail}_dasmo_scanner")
                     val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
 
                     authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
@@ -192,7 +192,8 @@ class HomeViewModel(
                                 "isApproved" to isAdminEmail,
                                 "isAdmin" to isAdminEmail,
                                 "role" to if (isAdminEmail) "admin" else "user",
-                                "status" to if (isAdminEmail) "approved" else "pending"
+                                "status" to if (isAdminEmail) "approved" else "pending",
+                                "appTag" to "dasmo_scanner"
                             )
                             docRef.set(user).addOnSuccessListener {
                                 _statusMessage.value = "Account created. Waiting for admin approval."
@@ -210,7 +211,7 @@ class HomeViewModel(
 
     private fun listenToAllUsers() {
         usersListenerRegistration?.remove()
-        usersListenerRegistration = firestore.collection("dasmo_doc_scanner").addSnapshotListener { snapshot, e ->
+        usersListenerRegistration = firestore.collection("users").whereEqualTo("appTag", "dasmo_scanner").addSnapshotListener { snapshot, e ->
             if (e != null) {
                 _statusMessage.value = "Error loading users: ${e.message}"
                 return@addSnapshotListener
@@ -259,7 +260,7 @@ class HomeViewModel(
         }
         val newApproved = !currentStatus
         val newStatus = if (newApproved) "approved" else "pending"
-        firestore.collection("dasmo_doc_scanner").document(email).update(
+        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
             "isApproved", newApproved,
             "status", newStatus
         )
@@ -271,7 +272,7 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("dasmo_doc_scanner").document(email).update(
+        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
             "isApproved", true,
             "status", "approved"
         ).addOnSuccessListener {
@@ -287,7 +288,7 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("dasmo_doc_scanner").document(email).update(
+        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
             "deviceId", "",
             "isApproved", false,
             "status", "pending"
@@ -590,6 +591,22 @@ class HomeViewModel(
 
     fun clearStatusMessage() {
         _statusMessage.value = ""
+    }
+
+    fun runDiagnostics() {
+        viewModelScope.launch {
+            firestore.collection("users").whereEqualTo("appTag", "dasmo_scanner").get().addOnSuccessListener { snapshot ->
+                var logStr = "Found ${snapshot.size()} docs: "
+                snapshot.documents.forEach { doc ->
+                    logStr += "${doc.id}=${doc.getString("status")} "
+                }
+                _statusMessage.value = logStr
+                android.util.Log.d("Diagnostics", logStr)
+            }.addOnFailureListener {
+                _statusMessage.value = "Failed: ${it.message}"
+                android.util.Log.e("Diagnostics", "Failed to fetch dasmo_doc_scanner", it)
+            }
+        }
     }
 
     private val _newRequestNotification = MutableStateFlow<String?>(null)

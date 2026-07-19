@@ -207,6 +207,7 @@ fun MainScreen(viewModel: HomeViewModel) {
     // Google Sign-In setup
     val gso = remember {
         GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(context.getString(R.string.default_web_client_id))
             .requestEmail()
             .requestScopes(Scope("https://www.googleapis.com/auth/drive"))
             .build()
@@ -251,8 +252,16 @@ fun MainScreen(viewModel: HomeViewModel) {
             try {
                 val account = task.getResult(ApiException::class.java)
                 if (account != null) {
-                    viewModel.setGoogleEmail(account.email)
-                    Toast.makeText(context, "Connected to ${account.email}", Toast.LENGTH_SHORT).show()
+                    val credential = com.google.firebase.auth.GoogleAuthProvider.getCredential(account.idToken, null)
+                    com.google.firebase.auth.FirebaseAuth.getInstance().signInWithCredential(credential)
+                        .addOnCompleteListener { authTask ->
+                            if (authTask.isSuccessful) {
+                                viewModel.setGoogleEmail(account.email)
+                                Toast.makeText(context, "Connected to ${account.email}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Firebase Auth failed: ${authTask.exception?.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -1600,7 +1609,8 @@ fun MainScreen(viewModel: HomeViewModel) {
                         onDecline = { email -> viewModel.revokeUserDevice(email) },
                         onToggleApproval = { email, isApproved -> viewModel.toggleUserApproval(email, isApproved) },
                         statusMessage = statusMessage,
-                        onClearStatus = { viewModel.clearStatusMessage() }
+                        onClearStatus = { viewModel.clearStatusMessage() },
+                        onRunDiagnostics = { viewModel.runDiagnostics() }
                     )
                 }
                 "FILES" -> {
