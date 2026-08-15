@@ -69,8 +69,10 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
     ) { uri: Uri? ->
         selectedImageUri = uri
         uri?.let {
-            val inputStream = context.contentResolver.openInputStream(it)
-            originalBitmap = BitmapFactory.decodeStream(inputStream)
+            val bitmap = context.contentResolver.openInputStream(it)?.use { stream ->
+                BitmapFactory.decodeStream(stream)
+            }
+            originalBitmap = bitmap
             processedBitmap = null
             cropScale = 1f
             cropOffsetX = 0f

@@ -134,6 +134,7 @@ fun MainScreen(viewModel: HomeViewModel) {
     val context = LocalContext.current
     val documents by viewModel.documents.collectAsStateWithLifecycle()
     val targetSizeKb by viewModel.targetSizeKb.collectAsStateWithLifecycle()
+    val imageFormat by viewModel.imageFormat.collectAsStateWithLifecycle()
     val enableAiAnalysis by viewModel.enableAiAnalysis.collectAsStateWithLifecycle()
     val showConfirmation by viewModel.showConfirmation.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
@@ -289,6 +290,7 @@ fun MainScreen(viewModel: HomeViewModel) {
 
     val accumulatedPageUris = remember { mutableStateListOf<Uri>() }
     var showMultiScanDialog by remember { mutableStateOf(false) }
+    var showContinuousBatchCamera by remember { mutableStateOf(false) }
 
     var editingDoc by remember { mutableStateOf<com.example.data.DocumentEntity?>(null) }
     var editPersonName by remember { mutableStateOf("") }
@@ -411,19 +413,11 @@ fun MainScreen(viewModel: HomeViewModel) {
     }
 
     val launchBatchScan: () -> Unit = {
-        val activity = context.findActivity()
-        if (activity != null) {
-            batchScanner.getStartScanIntent(activity).addOnSuccessListener { intentSender ->
-                batchScannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-            }.addOnFailureListener { e ->
-                Toast.makeText(context, "Failed to launch batch scanner: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        } else {
-            Toast.makeText(context, "Activity context not found", Toast.LENGTH_SHORT).show()
-        }
+        showContinuousBatchCamera = true
     }
 
     if (authState != com.example.ui.AuthState.APPROVED) {
+        val dbLogs by viewModel.dbLogs.collectAsStateWithLifecycle()
         AuthGuardScreen(
             authState = authState,
             googleSignInClient = googleSignInClient,
@@ -431,8 +425,12 @@ fun MainScreen(viewModel: HomeViewModel) {
             onSignOut = {
                 googleSignInClient.signOut().addOnCompleteListener {
                     viewModel.setGoogleEmail(null)
+                    viewModel.clearDbLogs()
                 }
-            }
+            },
+            dbLogs = dbLogs,
+            onClearLogs = { viewModel.clearDbLogs() },
+            onRunDiagnostics = { viewModel.runDiagnostics() }
         )
         return
     }
@@ -1000,6 +998,47 @@ fun MainScreen(viewModel: HomeViewModel) {
                                         )
                                     }
                                 }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // Card 3 (Image Format)
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                                    shape = RoundedCornerShape(16.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { 
+                                            viewModel.updateImageFormat(if (imageFormat == "WEBP") "JPEG" else "WEBP")
+                                        }
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Text(
+                                            "IMAGE FORMAT",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            imageFormat,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            if (imageFormat == "WEBP") "Smaller size, lossless" else "Wider compatibility",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                
+                                // Placeholder card to maintain grid layout
+                                Spacer(modifier = Modifier.weight(1f))
                             }
 
                             // Confirmation Screen Setting Toggle
@@ -1603,6 +1642,7 @@ fun MainScreen(viewModel: HomeViewModel) {
                     com.example.ui.PassportPhotoScreen(onBack = { activeTab = "DASHBOARD" })
                 }
                 "APPROVALS" -> {
+                    val dbLogs by viewModel.dbLogs.collectAsStateWithLifecycle()
                     AdminDashboardScreen(
                         allUsers = allUsers,
                         onApprove = { email -> viewModel.approveUser(email) },
@@ -1610,7 +1650,9 @@ fun MainScreen(viewModel: HomeViewModel) {
                         onToggleApproval = { email, isApproved -> viewModel.toggleUserApproval(email, isApproved) },
                         statusMessage = statusMessage,
                         onClearStatus = { viewModel.clearStatusMessage() },
-                        onRunDiagnostics = { viewModel.runDiagnostics() }
+                        onRunDiagnostics = { viewModel.runDiagnostics() },
+                        dbLogs = dbLogs,
+                        onClearLogs = { viewModel.clearDbLogs() }
                     )
                 }
                 "FILES" -> {
@@ -2633,6 +2675,16 @@ fun MainScreen(viewModel: HomeViewModel) {
                 }
             }
         }
+    }
+
+    if (showContinuousBatchCamera) {
+        com.example.ui.BatchCameraScanScreen(
+            onDismiss = { showContinuousBatchCamera = false },
+            onFinishBatch = { uris ->
+                showContinuousBatchCamera = false
+                viewModel.processBatchScannedImages(uris)
+            }
+        )
     }
 
     if (batchVerificationGroups != null) {

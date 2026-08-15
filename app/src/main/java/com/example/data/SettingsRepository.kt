@@ -23,6 +23,12 @@ class SettingsRepository(private val context: Context) {
     private val TARGET_SUBFOLDER = stringPreferencesKey("target_subfolder")
     private val AUTO_ENHANCE_ENABLED = androidx.datastore.preferences.core.booleanPreferencesKey("auto_enhance_enabled")
     private val USE_A4_FORMAT = androidx.datastore.preferences.core.booleanPreferencesKey("use_a4_format")
+    private val IMAGE_FORMAT = stringPreferencesKey("image_format")
+
+    val imageFormat: Flow<String> = context.dataStore.data
+        .map { preferences ->
+            preferences[IMAGE_FORMAT] ?: "WEBP" // Default to WEBP
+        }
 
     val targetSizeKb: Flow<Int> = context.dataStore.data
         .map { preferences ->
@@ -130,6 +136,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setTargetSubfolder(subfolder: String) {
         context.dataStore.edit { preferences ->
             preferences[TARGET_SUBFOLDER] = subfolder
+        }
+    }
+
+    suspend fun setImageFormat(format: String) {
+        context.dataStore.edit { preferences ->
+            preferences[IMAGE_FORMAT] = format
         }
     }
 }

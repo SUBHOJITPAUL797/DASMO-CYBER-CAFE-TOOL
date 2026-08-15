@@ -25,6 +25,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ui.AppUser
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import android.widget.Toast
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,9 +42,13 @@ fun AdminDashboardScreen(
     onToggleApproval: (String, Boolean) -> Unit,
     statusMessage: String,
     onClearStatus: () -> Unit,
-    onRunDiagnostics: () -> Unit = {}
+    onRunDiagnostics: () -> Unit = {},
+    dbLogs: List<String> = emptyList(),
+    onClearLogs: () -> Unit = {}
 ) {
     var selectedTab by remember { mutableStateOf(0) } // 0 = Pending, 1 = All Users
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
     val pendingUsers = allUsers.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
     val approvedUsers = allUsers.filter { it.isApproved && !it.isAdmin }
     val admins = allUsers.filter { it.isAdmin }
@@ -215,7 +226,7 @@ fun AdminDashboardScreen(
         // User lists
         Box(
             modifier = Modifier
-                .fillMaxSize()
+                .weight(1f)
                 .padding(horizontal = 16.dp)
         ) {
             if (selectedTab == 0) {
@@ -259,6 +270,185 @@ fun AdminDashboardScreen(
                                 onToggleApproval = { onToggleApproval(user.email, user.isApproved) },
                                 onRevoke = { onDecline(user.email) }
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Collapsible Firebase / Firestore Diagnostic Logger
+        var logsExpanded by remember { mutableStateOf(false) } // Default collapsed on dashboard to save space
+        val lazyListState = rememberLazyListState()
+
+        // Auto-scroll to latest log line
+        LaunchedEffect(dbLogs.size) {
+            if (dbLogs.isNotEmpty()) {
+                lazyListState.animateScrollToItem(dbLogs.size - 1)
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable { logsExpanded = !logsExpanded }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Terminal,
+                        contentDescription = "Terminal",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Firebase Diagnostic Console",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (logsExpanded) {
+                    Icon(
+                        imageVector = Icons.Default.ExpandLess,
+                        contentDescription = "Collapse",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.ExpandMore,
+                        contentDescription = "Expand",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = logsExpanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
+                        )
+                        .background(Color(0xFF1E1E1E))
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "LIVE FIRESTORE TRANSACTION FLOW:",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            ),
+                            color = Color(0xFFAAAAAA)
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(
+                                onClick = onRunDiagnostics,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(26.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF4CAF50))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Run Test",
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Test Conn", fontSize = 10.sp)
+                            }
+                            TextButton(
+                                onClick = {
+                                    val textToCopy = dbLogs.joinToString("\n")
+                                    clipboardManager.setText(AnnotatedString(textToCopy))
+                                    Toast.makeText(context, "Diagnostic logs copied to clipboard!", Toast.LENGTH_SHORT).show()
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(26.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF64B5F6))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy Logs",
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Copy", fontSize = 10.sp)
+                            }
+                            TextButton(
+                                onClick = onClearLogs,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.height(26.dp),
+                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFE57373))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ClearAll,
+                                    contentDescription = "Clear",
+                                    modifier = Modifier.size(12.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Clear", fontSize = 10.sp)
+                            }
+                        }
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(130.dp)
+                            .background(Color(0xFF121212), shape = RoundedCornerShape(6.dp))
+                            .border(1.dp, Color(0xFF2C2C2C), shape = RoundedCornerShape(6.dp))
+                            .padding(8.dp)
+                    ) {
+                        if (dbLogs.isEmpty()) {
+                            Text(
+                                text = "Ready. Diagnostic traces from user registrations and approvals will appear here.",
+                                style = androidx.compose.ui.text.TextStyle(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF888888)
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            LazyColumn(
+                                state = lazyListState,
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                items(dbLogs) { log ->
+                                    val color = when {
+                                        log.contains("ERROR", true) || log.contains("FAILED", true) || log.contains("DENIED", true) -> Color(0xFFEF5350)
+                                        log.contains("SUCCESS", true) || log.contains("GRANTED", true) || log.contains("approved successfully", true) -> Color(0xFF66BB6A)
+                                        log.contains("PENDING", true) || log.contains("Waiting", true) -> Color(0xFFFFB74D)
+                                        else -> Color(0xFFE0E0E0)
+                                    }
+                                    Text(
+                                        text = log,
+                                        style = androidx.compose.ui.text.TextStyle(
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 11.sp,
+                                            color = color
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
                 }

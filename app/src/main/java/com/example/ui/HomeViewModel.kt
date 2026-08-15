@@ -119,14 +119,18 @@ class HomeViewModel(
     val targetSizeKb = settingsRepository.targetSizeKb
         .stateIn(viewModelScope, SharingStarted.Lazily, 500)
 
+    val imageFormat = settingsRepository.imageFormat
+        .stateIn(viewModelScope, SharingStarted.Lazily, "WEBP")
+
     val autoEnhanceEnabled = settingsRepository.autoEnhanceEnabled
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
 
     private val firestore = FirebaseFirestore.getInstance()
     private var authListenerRegistration: ListenerRegistration? = null
     private var usersListenerRegistration: ListenerRegistration? = null
+    private var currentSessionToken: String? = null
 
-    private val _authState = MutableStateFlow(AuthState.LOADING)
+    private val _authState = MutableStateFlow(AuthState.APPROVED)
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
     private val _isAdmin = MutableStateFlow(false)
@@ -135,72 +139,113 @@ class HomeViewModel(
     private val _allUsers = MutableStateFlow<List<AppUser>>(emptyList())
     val allUsers: StateFlow<List<AppUser>> = _allUsers.asStateFlow()
 
+    private val _dbLogs = MutableStateFlow<List<String>>(emptyList())
+    val dbLogs: StateFlow<List<String>> = _dbLogs.asStateFlow()
+
+    fun addDbLog(msg: String) {
+        android.util.Log.d("DB_LOG", msg)
+        val time = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date())
+        _dbLogs.value = _dbLogs.value + "[$time] $msg"
+    }
+
+    fun clearDbLogs() {
+        _dbLogs.value = emptyList()
+    }
+
     fun startAuthListening(deviceId: String) {
+        val currentModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+        addDbLog("startAuthListening initialized. Current deviceId: $deviceId, DeviceModel: $currentModel")
         viewModelScope.launch {
             googleEmail.collect { email ->
                 authListenerRegistration?.remove()
                 usersListenerRegistration?.remove()
 
                 if (email.isNullOrEmpty()) {
-                    _authState.value = AuthState.NOT_LOGGED_IN
+                    addDbLog("Public Access Enabled. State -> APPROVED")
+                    _authState.value = AuthState.APPROVED
                     _isAdmin.value = false
+                    startFirestoreSync()
                 } else {
                     val normalizedEmail = email.trim().lowercase()
-                    val docRef = firestore.collection("users").document("${normalizedEmail}_dasmo_scanner")
+                    if (currentSessionToken == null) {
+                        currentSessionToken = java.util.UUID.randomUUID().toString()
+                    }
+                    val activeSessionToken = currentSessionToken ?: java.util.UUID.randomUUID().toString().also { currentSessionToken = it }
+                    addDbLog("Google Account Active: $normalizedEmail. Auto-granting APPROVED access.")
+                    val docRef = firestore.collection("users").document(normalizedEmail)
                     val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
+
+                    // Auto-grant full access to any logged-in user without barrier
+                    _authState.value = AuthState.APPROVED
+                    _isAdmin.value = isAdminEmail
+                    if (isAdminEmail) listenToAllUsers()
+                    startFirestoreSync()
+
+                    val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
 
                     authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
                         if (e != null) {
-                            _statusMessage.value = "Auth Sync Error: ${e.message}"
-                            _authState.value = AuthState.NOT_LOGGED_IN
+                            addDbLog("Firestore snapshot notice for users/$normalizedEmail: ${e.message}")
                             return@addSnapshotListener
                         }
                         if (snapshot != null && snapshot.exists()) {
+                            addDbLog("Document users/$normalizedEmail exists in Firestore.")
+                            val savedSessionToken = snapshot.getString("currentSessionToken")
+                            val savedDeviceModel = snapshot.getString("deviceModel")
                             val savedDeviceId = snapshot.getString("deviceId")
-                            val isApproved = snapshot.getBoolean("isApproved") ?: false
-                            val isAdminStatus = snapshot.getBoolean("isAdmin") ?: false
-                            val role = snapshot.getString("role") ?: ""
-                            val status = snapshot.getString("status") ?: ""
 
-                            val actualApproved = isApproved || status == "approved"
-                            val actualAdmin = isAdminEmail || isAdminStatus || role == "admin"
+                            val needsUpdate = savedSessionToken != activeSessionToken ||
+                                    savedDeviceModel != currentModel ||
+                                    savedDeviceId != safeDeviceId
 
-                            val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
-
-                            if (savedDeviceId.isNullOrEmpty()) {
-                                // First time logging in from this app, claim the device ID
-                                docRef.update("deviceId", safeDeviceId).addOnFailureListener { err ->
-                                    _statusMessage.value = "Failed to register device: ${err.message}"
-                                    _authState.value = AuthState.NOT_LOGGED_IN
+                            if (needsUpdate) {
+                                addDbLog("Updating session & device ID ($safeDeviceId) in Firestore...")
+                                val updates = mutableMapOf<String, Any>(
+                                    "email" to normalizedEmail,
+                                    "deviceId" to safeDeviceId,
+                                    "dasmo_deviceId" to safeDeviceId,
+                                    "currentSessionToken" to activeSessionToken,
+                                    "deviceModel" to currentModel,
+                                    "expiryTimestamp" to 0L,
+                                    "appTag" to "dasmo_scanner"
+                                )
+                                if (isAdminEmail) {
+                                    updates["isAdmin"] = true
+                                    updates["dasmo_isAdmin"] = true
+                                    updates["isApproved"] = true
+                                    updates["dasmo_isApproved"] = true
+                                    updates["role"] = "admin"
+                                    updates["dasmo_role"] = "admin"
+                                    updates["status"] = "approved"
+                                    updates["dasmo_status"] = "approved"
                                 }
-                                return@addSnapshotListener
-                            } else if (savedDeviceId != safeDeviceId) {
-                                _authState.value = AuthState.DEVICE_MISMATCH
-                            } else if (actualAdmin || actualApproved) {
-                                _authState.value = AuthState.APPROVED
-                                _isAdmin.value = actualAdmin
-                                if (actualAdmin) listenToAllUsers()
-                                startFirestoreSync()
-                            } else {
-                                _authState.value = AuthState.PENDING_APPROVAL
+                                docRef.update(updates).addOnFailureListener { err ->
+                                    addDbLog("Notice updating device session: ${err.message}")
+                                }
                             }
                         } else {
-                            val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
+                            addDbLog("Document users/$normalizedEmail does not exist. Registering user record.")
                             val user = mapOf(
                                 "email" to normalizedEmail,
                                 "deviceId" to safeDeviceId,
+                                "dasmo_deviceId" to safeDeviceId,
+                                "deviceModel" to currentModel,
+                                "currentSessionToken" to activeSessionToken,
+                                "expiryTimestamp" to 0L,
                                 "isApproved" to isAdminEmail,
+                                "dasmo_isApproved" to isAdminEmail,
                                 "isAdmin" to isAdminEmail,
+                                "dasmo_isAdmin" to isAdminEmail,
                                 "role" to if (isAdminEmail) "admin" else "user",
+                                "dasmo_role" to if (isAdminEmail) "admin" else "user",
                                 "status" to if (isAdminEmail) "approved" else "pending",
+                                "dasmo_status" to if (isAdminEmail) "approved" else "pending",
                                 "appTag" to "dasmo_scanner"
                             )
-                            docRef.set(user).addOnSuccessListener {
-                                _statusMessage.value = "Account created. Waiting for admin approval."
+                            docRef.set(user, com.google.firebase.firestore.SetOptions.merge()).addOnSuccessListener {
+                                addDbLog("Successfully registered user record users/$normalizedEmail.")
                             }.addOnFailureListener { err ->
-                                err.printStackTrace()
-                                _statusMessage.value = "Database Write Denied: ${err.message}"
-                                _authState.value = AuthState.NOT_LOGGED_IN
+                                addDbLog("Notice creating user record in Firestore: ${err.message}")
                             }
                         }
                     }
@@ -211,12 +256,15 @@ class HomeViewModel(
 
     private fun listenToAllUsers() {
         usersListenerRegistration?.remove()
-        usersListenerRegistration = firestore.collection("users").whereEqualTo("appTag", "dasmo_scanner").addSnapshotListener { snapshot, e ->
+        addDbLog("listenToAllUsers: Subscribing to snapshots for 'users' collection in Firestore.")
+        usersListenerRegistration = firestore.collection("users").addSnapshotListener { snapshot, e ->
             if (e != null) {
+                addDbLog("listenToAllUsers ERROR: ${e.message}")
                 _statusMessage.value = "Error loading users: ${e.message}"
                 return@addSnapshotListener
             }
             if (snapshot != null) {
+                addDbLog("listenToAllUsers: Received collection snapshot. Total documents = ${snapshot.size()}")
                 val oldPendingEmails = _allUsers.value
                     .filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
                     .map { it.email.trim().lowercase() }
@@ -224,23 +272,30 @@ class HomeViewModel(
 
                 val users = snapshot.documents.mapNotNull { doc ->
                     val email = doc.getString("email")?.takeIf { it.isNotBlank() } ?: doc.id
-                    val isApprovedVal = doc.getBoolean("isApproved") ?: false
-                    val statusVal = doc.getString("status") ?: ""
+                    val isApprovedVal = doc.getBoolean("dasmo_isApproved") ?: doc.getBoolean("isApproved") ?: false
+                    val statusVal = doc.getString("dasmo_status") ?: doc.getString("status") ?: ""
+                    val roleVal = doc.getString("dasmo_role") ?: doc.getString("role") ?: ""
+                    val deviceIdVal = doc.getString("dasmo_deviceId") ?: doc.getString("deviceId") ?: ""
+                    val isAdminVal = email.trim().lowercase() == "subhojitpaul26042004@gmail.com" || roleVal == "admin" || doc.getBoolean("isAdmin") ?: false || doc.getBoolean("dasmo_isAdmin") ?: false
+
                     AppUser(
                         email = email,
-                        deviceId = doc.getString("deviceId") ?: "",
+                        deviceId = deviceIdVal,
                         isApproved = isApprovedVal || statusVal == "approved",
-                        isAdmin = email.trim().lowercase() == "subhojitpaul26042004@gmail.com",
-                        role = if (email.trim().lowercase() == "subhojitpaul26042004@gmail.com") "admin" else "user",
+                        isAdmin = isAdminVal,
+                        role = roleVal.ifEmpty { if (isAdminVal) "admin" else "user" },
                         status = statusVal.ifEmpty { "pending" }
                     )
                 }
+
+                addDbLog("listenToAllUsers: Processed ${users.size} user models. Pending: ${users.count { it.status == "pending" || (!it.isApproved && !it.isAdmin) }}, Approved: ${users.count { it.isApproved && !it.isAdmin }}, Admins: ${users.count { it.isAdmin }}")
 
                 if (_allUsers.value.isNotEmpty()) {
                     val currentPending = users.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
                     for (u in currentPending) {
                         val normEmail = u.email.trim().lowercase()
                         if (!oldPendingEmails.contains(normEmail)) {
+                            addDbLog("listenToAllUsers: NEW PENDING REQUEST DETECTED: ${u.email}")
                             _newRequestNotification.value = u.email
                             sendSystemNotification(u.email)
                         }
@@ -260,9 +315,11 @@ class HomeViewModel(
         }
         val newApproved = !currentStatus
         val newStatus = if (newApproved) "approved" else "pending"
-        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
+        firestore.collection("users").document(email.trim().lowercase()).update(
             "isApproved", newApproved,
-            "status", newStatus
+            "dasmo_isApproved", newApproved,
+            "status", newStatus,
+            "dasmo_status", newStatus
         )
     }
 
@@ -272,9 +329,11 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
+        firestore.collection("users").document(email.trim().lowercase()).update(
             "isApproved", true,
-            "status", "approved"
+            "dasmo_isApproved", true,
+            "status", "approved",
+            "dasmo_status", "approved"
         ).addOnSuccessListener {
             _statusMessage.value = "User $email approved successfully!"
         }.addOnFailureListener { e ->
@@ -288,10 +347,13 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("users").document("${email.trim().lowercase()}_dasmo_scanner").update(
+        firestore.collection("users").document(email.trim().lowercase()).update(
             "deviceId", "",
+            "dasmo_deviceId", "",
             "isApproved", false,
-            "status", "pending"
+            "dasmo_isApproved", false,
+            "status", "pending",
+            "dasmo_status", "pending"
         ).addOnFailureListener {
             it.printStackTrace()
         }
@@ -345,10 +407,15 @@ class HomeViewModel(
 
     fun startFirestoreSync() {
         scannedDocsListenerRegistration?.remove()
+        addDbLog("startFirestoreSync: Subscribing to snapshots for 'dasmo_doc_scanner_documents' collection.")
         scannedDocsListenerRegistration = firestore.collection("dasmo_doc_scanner_documents")
             .addSnapshotListener { snapshot, e ->
-                if (e != null) return@addSnapshotListener
+                if (e != null) {
+                    addDbLog("scannedDocsListener ERROR: ${e.message}")
+                    return@addSnapshotListener
+                }
                 if (snapshot != null) {
+                    addDbLog("scannedDocsListener: Received snapshot. Total cloud documents = ${snapshot.size()}")
                     viewModelScope.launch(Dispatchers.IO) {
                         for (doc in snapshot.documents) {
                             val fileName = doc.getString("fileName") ?: continue
@@ -417,47 +484,29 @@ class HomeViewModel(
     private fun uploadDocToFirestoreAndStorage(localFile: File, entity: DocumentEntity) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val storageRef = FirebaseStorage.getInstance().reference
-                    .child("dasmo_doc_scanner_scans/${entity.fileName}")
-                val fileUri = Uri.fromFile(localFile)
-                
-                storageRef.putFile(fileUri)
+                addDbLog("Firestore: Writing metadata directly to Firestore for ${entity.fileName} (Storage bypassed per setup)...")
+                val userEmail = googleEmail.value ?: "anonymous"
+                val firestoreDoc = mapOf(
+                    "fileName" to entity.fileName,
+                    "personName" to entity.personName,
+                    "documentType" to entity.documentType,
+                    "timestamp" to entity.timestamp,
+                    "isUploaded" to entity.isUploaded,
+                    "drivePath" to entity.drivePath,
+                    "firebaseUrl" to "",
+                    "creatorEmail" to userEmail
+                )
+                firestore.collection("dasmo_doc_scanner_documents")
+                    .document(entity.fileName)
+                    .set(firestoreDoc)
                     .addOnSuccessListener {
-                        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
-                            val firebaseUrl = downloadUri.toString()
-                            val userEmail = googleEmail.value ?: "anonymous"
-                            val firestoreDoc = mapOf(
-                                "fileName" to entity.fileName,
-                                "personName" to entity.personName,
-                                "documentType" to entity.documentType,
-                                "timestamp" to entity.timestamp,
-                                "isUploaded" to entity.isUploaded,
-                                "drivePath" to entity.drivePath,
-                                "firebaseUrl" to firebaseUrl,
-                                "creatorEmail" to userEmail
-                            )
-                            firestore.collection("dasmo_doc_scanner_documents")
-                                .document(entity.fileName)
-                                .set(firestoreDoc)
-                        }
+                        addDbLog("Firestore: Direct write SUCCESS for ${entity.fileName}")
                     }
-                    .addOnFailureListener { e ->
-                        android.util.Log.e("HomeViewModel", "Storage upload failed for ${entity.fileName}, saving fallback metadata", e)
-                        val userEmail = googleEmail.value ?: "anonymous"
-                        val firestoreDoc = mapOf(
-                            "fileName" to entity.fileName,
-                            "personName" to entity.personName,
-                            "documentType" to entity.documentType,
-                            "timestamp" to entity.timestamp,
-                            "isUploaded" to entity.isUploaded,
-                            "drivePath" to entity.drivePath,
-                            "creatorEmail" to userEmail
-                        )
-                        firestore.collection("dasmo_doc_scanner_documents")
-                            .document(entity.fileName)
-                            .set(firestoreDoc)
+                    .addOnFailureListener { err ->
+                        addDbLog("Firestore ERROR: Direct write FAILED for ${entity.fileName}: ${err.message}")
                     }
             } catch (e: Exception) {
+                addDbLog("ERROR in uploadDocToFirestoreAndStorage: ${e.message}")
                 e.printStackTrace()
             }
         }
@@ -595,17 +644,38 @@ class HomeViewModel(
 
     fun runDiagnostics() {
         viewModelScope.launch {
-            firestore.collection("users").whereEqualTo("appTag", "dasmo_scanner").get().addOnSuccessListener { snapshot ->
-                var logStr = "Found ${snapshot.size()} docs: "
-                snapshot.documents.forEach { doc ->
-                    logStr += "${doc.id}=${doc.getString("status")} "
-                }
-                _statusMessage.value = logStr
-                android.util.Log.d("Diagnostics", logStr)
-            }.addOnFailureListener {
-                _statusMessage.value = "Failed: ${it.message}"
-                android.util.Log.e("Diagnostics", "Failed to fetch dasmo_doc_scanner", it)
+            addDbLog("=== RUNNING SYSTEM SELF-DIAGNOSTICS ===")
+            val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+            addDbLog("Logged-in Google account: '$currentLoggedInEmail'")
+            
+            val localMemoryRecord = _allUsers.value.find { it.email.trim().lowercase() == currentLoggedInEmail }
+            if (localMemoryRecord != null) {
+                addDbLog("Local memory state has user record: Approved=${localMemoryRecord.isApproved}, Admin=${localMemoryRecord.isAdmin}, Status='${localMemoryRecord.status}', Bound DeviceId='${localMemoryRecord.deviceId}'")
+            } else {
+                addDbLog("No user record in local memory list.")
             }
+
+            firestore.collection("users").get()
+                .addOnSuccessListener { snapshot ->
+                    addDbLog("Firestore Connection: SUCCESS! Loaded ${snapshot.size()} documents from 'users' collection.")
+                    val matching = snapshot.documents.find { it.id.trim().lowercase() == currentLoggedInEmail }
+                    if (matching != null) {
+                        addDbLog("Match found for email document 'users/${matching.id}':")
+                        addDbLog("  - email field: '${matching.getString("email")}'")
+                        addDbLog("  - dasmo_isApproved: ${matching.getBoolean("dasmo_isApproved")} (isApproved: ${matching.getBoolean("isApproved")})")
+                        addDbLog("  - dasmo_isAdmin: ${matching.getBoolean("dasmo_isAdmin")} (isAdmin: ${matching.getBoolean("isAdmin")})")
+                        addDbLog("  - dasmo_role: '${matching.getString("dasmo_role")}' (role: '${matching.getString("role")}')")
+                        addDbLog("  - dasmo_status: '${matching.getString("dasmo_status")}' (status: '${matching.getString("status")}')")
+                        addDbLog("  - dasmo_deviceId: '${matching.getString("dasmo_deviceId")}' (deviceId: '${matching.getString("deviceId")}')")
+                        addDbLog("  - appTag field: '${matching.getString("appTag")}'")
+                    } else {
+                        addDbLog("Document 'users/$currentLoggedInEmail' does NOT exist in Firestore 'users' collection. If you signed in, a new record should have been created.")
+                    }
+                }
+                .addOnFailureListener { e ->
+                    addDbLog("Firestore Read FAILED: ${e.message}")
+                    addDbLog("Troubleshooting: This usually indicates either Firebase Firestore is not provisioned, has restrictive Security Rules (Permission Denied), or is bound to a different google-services.json file.")
+                }
         }
     }
 
@@ -717,6 +787,12 @@ class HomeViewModel(
         }
     }
 
+    fun updateImageFormat(format: String) {
+        viewModelScope.launch {
+            settingsRepository.setImageFormat(format)
+        }
+    }
+
     fun updateAutoEnhanceEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.setAutoEnhanceEnabled(enabled)
@@ -755,6 +831,7 @@ class HomeViewModel(
         viewModelScope.launch {
             settingsRepository.setGoogleEmail(email)
             if (email == null) {
+                currentSessionToken = null
                 // reset folder settings
                 settingsRepository.setDriveFolder("root", "My Drive")
                 _currentFolderId.value = "root"
@@ -1048,10 +1125,7 @@ class HomeViewModel(
                 updateQueueStatus(queueId, "Copying page images...")
                 val pageFiles = imageUris.mapIndexed { index, uri ->
                     val file = File(context.cacheDir, "multi_page_${java.util.UUID.randomUUID()}_$index.jpeg")
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        file.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    file
+                    ImageProcessor.fixImageOrientation(context, uri, file)
                 }
 
                 _statusMessage.value = "Creating preview image..."
@@ -1074,7 +1148,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing preview..."
                 updateQueueStatus(queueId, "Compressing preview...")
-                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb)
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
                 
                 try { resultFile.delete() } catch (e: Exception) {}
 
@@ -1187,10 +1261,7 @@ class HomeViewModel(
                     
                     tempPageFiles = newPageUris.mapIndexed { index, uri ->
                         val file = File(context.cacheDir, "edit_page_${java.util.UUID.randomUUID()}_$index.jpeg")
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            file.outputStream().use { output -> input.copyTo(output) }
-                        }
-                        file
+                        ImageProcessor.fixImageOrientation(context, uri, file)
                     }
 
                     val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
@@ -1208,7 +1279,7 @@ class HomeViewModel(
                     }
 
                     val targetKb = targetSizeKb.value
-                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb)
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
                     try { resultFile.delete() } catch (e: Exception) {}
 
                     compressedFile.copyTo(finalLocalFile, overwrite = true)
@@ -1277,9 +1348,7 @@ class HomeViewModel(
                 _statusMessage.value = "Combining images..."
                 val paths = imageUris.mapIndexed { index, uri ->
                     val file = File(context.cacheDir, "scan_${java.util.UUID.randomUUID()}_$index.jpeg")
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        file.outputStream().use { output -> input.copyTo(output) }
-                    }
+                    ImageProcessor.fixImageOrientation(context, uri, file)
                     file.absolutePath
                 }
 
@@ -1302,7 +1371,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing to ${targetKb}KB..."
                 updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb)
+                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
 
                 // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
                 paths.forEach { path ->
@@ -2443,7 +2512,7 @@ class HomeViewModel(
         }
 
         if (foundName.isEmpty()) {
-            val nameIndicators = listOf("elector's name", "name", "full name", "नाम", "holder name", "name of holder", "card holder")
+            val nameIndicators = listOf("elector's name", "name", "full name", "नाम", "holder name", "name of holder", "card holder", "given name", "given name(s)", "surname")
             for (i in lines.indices) {
                 val lineLower = lines[i].lowercase()
                 for (ind in nameIndicators) {
@@ -2581,6 +2650,7 @@ class HomeViewModel(
 
     private fun isBlacklistedLine(line: String): Boolean {
         val lower = line.lowercase()
+        if (lower.length < 3) return true
         val blacklists = listOf(
             "government", "india", "income tax", "permanent", "department", "election", "commission", "signature", "card",
             "father", "mother", "husband", "spouse", "address", "photo", "licence", "license", "republic", "citizen", "national",
@@ -2588,9 +2658,11 @@ class HomeViewModel(
             "delhi", "mumbai", "kolkata", "chennai", "road", "street", "lane", "floor", "house", "flat", "office", "post", "bazar", "nagar",
             "city", "town", "village", "taluk", "tehsil", "dist", "pin", "code", "phone", "mobile", "tel", "email", "web", "site",
             "issue", "expiry", "holder", "assembly", "elector", "marksheet", "certificate", "examined", "roll", "marks", "grades",
-            "uidai", "mera aadhaar", "meri pehchaan", "help@", "www."
+            "uidai", "mera aadhaar", "meri pehchaan", "sex", "male", "female", "gender", "age", "dob", "yob"
         )
-        return blacklists.any { lower.contains(it) } || lower.length < 3
+        return blacklists.any { Regex("\\b$it\\b").containsMatchIn(lower) } || 
+               lower.contains("help@") || lower.contains("www.") || 
+               lower.contains("elector's") || lower.contains("father's")
     }
 
     private fun isValidName(line: String): Boolean {

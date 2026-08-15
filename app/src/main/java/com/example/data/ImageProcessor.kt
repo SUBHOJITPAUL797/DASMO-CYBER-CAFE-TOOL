@@ -3,7 +3,10 @@ package com.example.data
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.pdf.PdfDocument
+import android.media.ExifInterface
+import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -36,7 +39,110 @@ object ImageProcessor {
 
         options.inSampleSize = inSampleSize
         options.inJustDecodeBounds = false
-        return BitmapFactory.decodeFile(path, options)
+        var bitmap = BitmapFactory.decodeFile(path, options) ?: return null
+
+        try {
+            val exif = ExifInterface(path)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+
+            if (degrees != 0) {
+                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated != bitmap) {
+                    bitmap.recycle()
+                    bitmap = rotated
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        return bitmap
+    }
+
+    fun fixImageOrientation(context: Context, uri: Uri, outputFile: File): File {
+        try {
+            var inputStream = context.contentResolver.openInputStream(uri)
+            val exif = inputStream?.use { ExifInterface(it) }
+            val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) ?: ExifInterface.ORIENTATION_NORMAL
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+
+            inputStream = context.contentResolver.openInputStream(uri)
+            var bitmap = inputStream?.use { BitmapFactory.decodeStream(it) } ?: return copyRaw(context, uri, outputFile)
+
+            if (degrees != 0) {
+                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated != bitmap) {
+                    bitmap.recycle()
+                    bitmap = rotated
+                }
+            }
+
+            saveBitmap(bitmap, outputFile)
+            bitmap.recycle()
+            return outputFile
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return copyRaw(context, uri, outputFile)
+        }
+    }
+
+    fun fixFileOrientation(file: File): File {
+        try {
+            val exif = ExifInterface(file.absolutePath)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+
+            var bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return file
+
+            var modified = false
+            if (degrees != 0) {
+                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated != bitmap) {
+                    bitmap.recycle()
+                    bitmap = rotated
+                }
+                modified = true
+            }
+
+            if (modified) {
+                saveBitmap(bitmap, file)
+            }
+            bitmap.recycle()
+            return file
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return file
+        }
+    }
+
+    private fun copyRaw(context: Context, uri: Uri, outputFile: File): File {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                outputFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return outputFile
     }
 
     suspend fun combineImages(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
@@ -165,20 +271,41 @@ object ImageProcessor {
         outputFile
     }
 
-    private fun saveBitmap(bitmap: Bitmap, file: File) {
+    private fun saveBitmap(bitmap: Bitmap, file: File, format: String = "WEBP") {
         val fos = FileOutputStream(file)
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+        val compressFormat = if (format == "WEBP") {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else {
+                @Suppress("DEPRECATION")
+                Bitmap.CompressFormat.WEBP
+            }
+        } else {
+            Bitmap.CompressFormat.JPEG
+        }
+        bitmap.compress(compressFormat, 95, fos)
         fos.flush()
         fos.close()
     }
 
-    suspend fun compressImage(file: File, targetSizeKb: Int): File = withContext(Dispatchers.IO) {
+    suspend fun compressImage(file: File, targetSizeKb: Int, format: String = "WEBP"): File = withContext(Dispatchers.IO) {
         var bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw Exception("Failed to decode image file structure")
         val targetSizeBytes = targetSizeKb * 1024
 
+        val compressFormat = if (format == "WEBP") {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else {
+                @Suppress("DEPRECATION")
+                Bitmap.CompressFormat.WEBP
+            }
+        } else {
+            Bitmap.CompressFormat.JPEG
+        }
+
         // 1. Smart Resolution Optimization
         // Massive camera images (e.g. 4000px+) suffer severe low-quality degradation to fit under small KB targets.
-        // Scaling down to 1600px Max-Edge preserves gorgeous 1080p-equivalent textual sharpness, and reduces byte payload by ~70%.
+        // Scaling down to 2400px Max-Edge preserves gorgeous 1080p-equivalent textual sharpness, and reduces byte payload by ~70%.
         val maxTargetDimension = 2400
         if (bmp.width > maxTargetDimension || bmp.height > maxTargetDimension) {
             val scale = maxTargetDimension.toFloat() / kotlin.math.max(bmp.width, bmp.height)
@@ -193,6 +320,11 @@ object ImageProcessor {
             }
         }
 
+        // Apply Smart Text-Preserving & Solid Background Flattening Filter
+        val enhancedBmp = applySmartTextEnhancement(bmp)
+        bmp.recycle()
+        bmp = enhancedBmp
+
         // 2. High-Fidelity Quality Search (Binary Search for optimized compression ratio)
         var stream = ByteArrayOutputStream()
         var lowQuality = 70
@@ -202,7 +334,7 @@ object ImageProcessor {
         while (lowQuality <= highQuality) {
             val midQuality = (lowQuality + highQuality) / 2
             val tempStream = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, midQuality, tempStream)
+            bmp.compress(compressFormat, midQuality, tempStream)
             
             if (tempStream.size() <= targetSizeBytes) {
                 bestQuality = midQuality
@@ -217,12 +349,12 @@ object ImageProcessor {
         if (stream.size() == 0 || stream.size() > targetSizeBytes) {
             var quality = bestQuality
             stream = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+            bmp.compress(compressFormat, quality, stream)
             
             while (stream.size() > targetSizeBytes && quality > 45) {
                 quality -= 5
                 stream = ByteArrayOutputStream()
-                bmp.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+                bmp.compress(compressFormat, quality, stream)
             }
 
             // Extreme dimensional downscaling is the absolute last resort to keep text legible
@@ -236,7 +368,7 @@ object ImageProcessor {
                     prevBmp.recycle()
                 }
                 stream = ByteArrayOutputStream()
-                bmp.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+                bmp.compress(compressFormat, quality, stream)
             }
         }
 
@@ -248,6 +380,51 @@ object ImageProcessor {
         
         bmp.recycle() // Release decoder bitmap allocation
         compressedFile
+    }
+
+    /**
+     * Smart Text-Preserving Compression Algorithm:
+     * Analyzes image pixel luminance to isolate text/ink characters from solid/noisy background paper tones.
+     * Flattens noisy background areas into clean solid color (0xFFFFFFFF) while contrast-enhancing text strokes.
+     * This drastically improves JPEG run-length & DCT compression efficiency while keeping text razor-sharp.
+     */
+    fun applySmartTextEnhancement(src: Bitmap): Bitmap {
+        val width = src.width
+        val height = src.height
+        val pixels = IntArray(width * height)
+        src.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val lum = (299 * r + 587 * g + 114 * b) / 1000
+
+            val maxC = maxOf(r, maxOf(g, b))
+            val minC = minOf(r, minOf(g, b))
+            val saturation = maxC - minC
+
+            // Preserve photos, emblems, seals, holograms, and colored graphics intact
+            if (saturation > 25) {
+                continue
+            }
+
+            // Only flatten plain white/off-white paper background (lum >= 240) to pure white
+            if (lum >= 240) {
+                pixels[i] = 0xFFFFFFFF.toInt()
+            } else if (lum < 90) {
+                // Slightly deepen dark ink strokes for clear text contrast
+                val enhancedR = (r * 0.85f).toInt().coerceIn(0, 255)
+                val enhancedG = (g * 0.85f).toInt().coerceIn(0, 255)
+                val enhancedB = (b * 0.85f).toInt().coerceIn(0, 255)
+                pixels[i] = (0xFF shl 24) or (enhancedR shl 16) or (enhancedG shl 8) or enhancedB
+            }
+        }
+
+        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        result.setPixels(pixels, 0, width, 0, 0, width, height)
+        return result
     }
 
     suspend fun convertToMultiPagePdf(imageFiles: List<File>, outputFile: File, targetSizeKb: Int): File? = withContext(Dispatchers.IO) {
@@ -273,6 +450,10 @@ object ImageProcessor {
                     break
                 }
                 
+                val enhancedBmp = applySmartTextEnhancement(originalBitmap)
+                originalBitmap.recycle()
+                originalBitmap = enhancedBmp
+
                 // Convert to RGB_565 to save memory and PDF bytes significantly
                 val configBmp = originalBitmap.copy(Bitmap.Config.RGB_565, false)
                 if (configBmp != null && configBmp != originalBitmap) {
@@ -348,6 +529,10 @@ object ImageProcessor {
         var originalBitmap = BitmapFactory.decodeFile(imageFile.absolutePath) ?: return@withContext null
         val targetSizeBytes = targetSizeKb * 1024
         
+        val enhancedBmp = applySmartTextEnhancement(originalBitmap)
+        originalBitmap.recycle()
+        originalBitmap = enhancedBmp
+
         // Convert to RGB_565 to save memory and PDF bytes significantly, allowing a higher resolution for the same file size
         val configBmp = originalBitmap.copy(Bitmap.Config.RGB_565, false)
         if (configBmp != null && configBmp != originalBitmap) {

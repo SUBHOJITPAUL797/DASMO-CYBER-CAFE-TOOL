@@ -1,14 +1,4 @@
-enum class AuthState {
-    LOADING,
-    NOT_LOGGED_IN,
-    DEVICE_MISMATCH,
-    PENDING_APPROVAL,
-    APPROVED
+fun main() {
+    val blacklists = listOf("no", "pin", "tax")
+    println(blacklists.any { "manoj".contains(it) })
 }
-
-data class AppUser(
-    val email: String = "",
-    val deviceId: String = "",
-    val isApproved: Boolean = false,
-    val isAdmin: Boolean = false
-)
