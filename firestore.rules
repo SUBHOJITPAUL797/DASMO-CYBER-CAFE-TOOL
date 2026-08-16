@@ -1,15 +1,79 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return (isAuthenticated() && request.auth.token.email.lower() == 'subhojitpaul26042004@gmail.com') ||
+             (request.auth == null && resource != null && resource.data.get('email', '').lower() == 'subhojitpaul26042004@gmail.com');
+    }
+
+    function isOwner(email) {
+      return (isAuthenticated() && request.auth.token.email.lower() == email.lower()) ||
+             (request.auth == null);
+    }
+
+    // 1. DASMO PHOTO PRINT USERS
     match /dasmo_photo_print_users/{email} {
-      allow read, write: if true;
+      // Anyone can read their own user record; Admin can list/read all user records
+      allow read: if isOwner(email) || isAdmin();
+
+      // New users can create their own initial registration record
+      allow create: if (isOwner(email) && 
+                        (email.lower() == 'subhojitpaul26042004@gmail.com' ||
+                         (request.resource.data.get('isApproved', false) == false &&
+                          request.resource.data.get('role', 'user') == 'user' &&
+                          request.resource.data.get('status', 'pending') == 'pending'))) || isAdmin();
+
+      // Users can update their own device / session data, BUT cannot self-promote to admin or self-approve
+      allow update: if isAdmin() || 
+                       (isOwner(email) && 
+                        request.resource.data.get('isApproved', false) == resource.data.get('isApproved', false) &&
+                        request.resource.data.get('status', 'pending') == resource.data.get('status', 'pending') &&
+                        request.resource.data.get('role', 'user') == resource.data.get('role', 'user') &&
+                        request.resource.data.get('isAdmin', false) == resource.data.get('isAdmin', false) &&
+                        request.resource.data.get('expiryTimestamp', 0) == resource.data.get('expiryTimestamp', 0));
+
+      // Only the Super Admin can permanently delete accounts
+      allow delete: if isAdmin();
     }
+
+    // 2. DASMO SCANNER USERS
     match /dasmo_scanner_users/{email} {
-      allow read, write: if true;
+      // Anyone can read their own user record; Admin can list/read all user records
+      allow read: if isOwner(email) || isAdmin();
+
+      // New users can create their initial registration record
+      allow create: if (isOwner(email) && 
+                        (email.lower() == 'subhojitpaul26042004@gmail.com' ||
+                         (request.resource.data.get('isApproved', false) == false &&
+                          request.resource.data.get('role', 'user') == 'user' &&
+                          request.resource.data.get('status', 'pending') == 'pending'))) || isAdmin();
+
+      // Users can update their own session/device info, BUT cannot self-approve or change role/expiry
+      allow update: if isAdmin() || 
+                       (isOwner(email) && 
+                        request.resource.data.get('isApproved', false) == resource.data.get('isApproved', false) &&
+                        request.resource.data.get('status', 'pending') == resource.data.get('status', 'pending') &&
+                        request.resource.data.get('role', 'user') == resource.data.get('role', 'user') &&
+                        request.resource.data.get('isAdmin', false) == resource.data.get('isAdmin', false) &&
+                        request.resource.data.get('expiryTimestamp', 0) == resource.data.get('expiryTimestamp', 0));
+
+      // Only the Super Admin can delete
+      allow delete: if isAdmin();
     }
+
+    // 3. Fallback users collection
     match /users/{email} {
-      allow read, write: if true;
+      allow read: if isOwner(email) || isAdmin();
+      allow write: if isAdmin();
     }
+
+    // 4. Scanner document metadata
     match /dasmo_doc_scanner_documents/{documentId} {
       allow read, write: if true;
     }
