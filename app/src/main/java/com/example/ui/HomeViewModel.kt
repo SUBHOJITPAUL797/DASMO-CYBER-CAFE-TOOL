@@ -199,19 +199,35 @@ class HomeViewModel(
 
                             val isApproved = rawApproved || rawStatus == "approved" || rawAdmin
 
-                            if (rawAdmin) {
-                                addDbLog("Admin authenticated: $normalizedEmail. State -> APPROVED")
-                                _authState.value = AuthState.APPROVED
-                                _isAdmin.value = true
-                                listenToAllUsers()
-                                startFirestoreSync()
+                            // 1. Strict Hardware Device Binding Check (One Account Per Physical Device)
+                            if (rawDeviceId.isNotEmpty() && rawDeviceId != safeDeviceId) {
+                                addDbLog("DEVICE MISMATCH: Account bound to '$rawDeviceModel' ($rawDeviceId). Current device is '$currentModel' ($safeDeviceId)")
+                                _authState.value = AuthState.DEVICE_MISMATCH
+                                _isAdmin.value = false
+                                return@addSnapshotListener
+                            }
 
-                                // Update admin device info
+                            // If not yet bound to a device (first login or after admin unbinds), bind this physical device:
+                            if (rawDeviceId.isEmpty()) {
                                 docRef.update(
                                     mapOf(
                                         "deviceId" to safeDeviceId,
                                         "dasmo_deviceId" to safeDeviceId,
                                         "deviceModel" to currentModel,
+                                        "lastActiveTimestamp" to System.currentTimeMillis()
+                                    )
+                                )
+                            }
+
+                            if (rawAdmin) {
+                                addDbLog("Admin authenticated: $normalizedEmail on bound device. State -> APPROVED")
+                                _authState.value = AuthState.APPROVED
+                                _isAdmin.value = true
+                                listenToAllUsers()
+                                startFirestoreSync()
+
+                                docRef.update(
+                                    mapOf(
                                         "currentSessionToken" to activeSessionToken,
                                         "lastActiveTimestamp" to System.currentTimeMillis(),
                                         "isApproved" to true,
@@ -227,26 +243,9 @@ class HomeViewModel(
                             } else {
                                 _isAdmin.value = false
 
-                                // 1. Device Binding Verification (Anti-sharing)
-                                if (rawDeviceId.isNotEmpty() && rawDeviceId != safeDeviceId) {
-                                    addDbLog("DEVICE MISMATCH: Account bound to '$rawDeviceModel' ($rawDeviceId). Current device is '$currentModel' ($safeDeviceId)")
-                                    _authState.value = AuthState.DEVICE_MISMATCH
-                                    return@addSnapshotListener
-                                }
-
                                 // 2. Admin Approval Verification
                                 if (!isApproved || rawStatus != "approved") {
                                     addDbLog("AWAITING APPROVAL: User $normalizedEmail status is '$rawStatus' (isApproved=$isApproved). Access blocked.")
-                                    if (rawDeviceId.isEmpty()) {
-                                        docRef.update(
-                                            mapOf(
-                                                "deviceId" to safeDeviceId,
-                                                "dasmo_deviceId" to safeDeviceId,
-                                                "deviceModel" to currentModel,
-                                                "lastActiveTimestamp" to System.currentTimeMillis()
-                                            )
-                                        )
-                                    }
                                     _authState.value = AuthState.PENDING_APPROVAL
                                     return@addSnapshotListener
                                 }
@@ -265,9 +264,6 @@ class HomeViewModel(
 
                                 docRef.update(
                                     mapOf(
-                                        "deviceId" to safeDeviceId,
-                                        "dasmo_deviceId" to safeDeviceId,
-                                        "deviceModel" to currentModel,
                                         "currentSessionToken" to activeSessionToken,
                                         "lastActiveTimestamp" to System.currentTimeMillis(),
                                         "appTag" to "dasmo_scanner"
