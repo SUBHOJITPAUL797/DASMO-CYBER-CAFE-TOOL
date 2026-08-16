@@ -118,7 +118,9 @@ class HomeViewModel(
         }
         authListenerRegistration?.remove()
         usersListenerRegistration?.remove()
+        scannedDocsListenerRegistration?.remove()
     }
+
 
     val documents = database.documentDao().getAllDocuments()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
@@ -207,14 +209,13 @@ class HomeViewModel(
                                 return@addSnapshotListener
                             }
 
-                            // If not yet bound to a device (first login or after admin unbinds), bind this physical device:
+                            // If not yet bound to a device (first login or after admin unbinds), bind this physical device ONCE:
                             if (rawDeviceId.isEmpty()) {
                                 docRef.update(
                                     mapOf(
                                         "deviceId" to safeDeviceId,
                                         "dasmo_deviceId" to safeDeviceId,
-                                        "deviceModel" to currentModel,
-                                        "lastActiveTimestamp" to System.currentTimeMillis()
+                                        "deviceModel" to currentModel
                                     )
                                 )
                             }
@@ -223,23 +224,12 @@ class HomeViewModel(
                                 addDbLog("Admin authenticated: $normalizedEmail on bound device. State -> APPROVED")
                                 _authState.value = AuthState.APPROVED
                                 _isAdmin.value = true
-                                listenToAllUsers()
-                                startFirestoreSync()
-
-                                docRef.update(
-                                    mapOf(
-                                        "currentSessionToken" to activeSessionToken,
-                                        "lastActiveTimestamp" to System.currentTimeMillis(),
-                                        "isApproved" to true,
-                                        "dasmo_isApproved" to true,
-                                        "isAdmin" to true,
-                                        "dasmo_isAdmin" to true,
-                                        "status" to "approved",
-                                        "dasmo_status" to "approved",
-                                        "role" to "admin",
-                                        "dasmo_role" to "admin"
-                                    )
-                                )
+                                if (usersListenerRegistration == null) {
+                                    listenToAllUsers()
+                                }
+                                if (scannedDocsListenerRegistration == null) {
+                                    startFirestoreSync()
+                                }
                             } else {
                                 _isAdmin.value = false
 
@@ -260,18 +250,12 @@ class HomeViewModel(
                                 // 4. Approved & Device Matched: Full Access!
                                 addDbLog("ACCESS GRANTED: User $normalizedEmail approved on bound device ($safeDeviceId).")
                                 _authState.value = AuthState.APPROVED
-                                startFirestoreSync()
-
-                                docRef.update(
-                                    mapOf(
-                                        "currentSessionToken" to activeSessionToken,
-                                        "lastActiveTimestamp" to System.currentTimeMillis(),
-                                        "appTag" to "dasmo_scanner"
-                                    )
-                                )
+                                if (scannedDocsListenerRegistration == null) {
+                                    startFirestoreSync()
+                                }
                             }
                         } else {
-                            // User not registered in Firestore -> Create record
+                            // User not registered in Firestore -> Create record ONCE
                             addDbLog("Registering new user record in Firestore: users/$normalizedEmail")
                             val userDoc = mapOf(
                                 "email" to normalizedEmail,
@@ -299,14 +283,19 @@ class HomeViewModel(
                             if (isAdminEmail) {
                                 _authState.value = AuthState.APPROVED
                                 _isAdmin.value = true
-                                listenToAllUsers()
-                                startFirestoreSync()
+                                if (usersListenerRegistration == null) {
+                                    listenToAllUsers()
+                                }
+                                if (scannedDocsListenerRegistration == null) {
+                                    startFirestoreSync()
+                                }
                             } else {
                                 _authState.value = AuthState.PENDING_APPROVAL
                                 _isAdmin.value = false
                             }
                         }
                     }
+
                 }
             }
         }
@@ -2892,3 +2881,5 @@ class HomeViewModel(
         }
     }
 }
+
+
