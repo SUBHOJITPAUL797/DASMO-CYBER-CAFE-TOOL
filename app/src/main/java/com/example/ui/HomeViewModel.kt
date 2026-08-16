@@ -161,145 +161,168 @@ class HomeViewModel(
         _dbLogs.value = emptyList()
     }
 
+    fun loginUser(email: String, deviceId: String) {
+        val normalizedEmail = email.trim().lowercase()
+        addDbLog("loginUser called for: $normalizedEmail")
+        _authState.value = AuthState.LOADING
+        viewModelScope.launch {
+            settingsRepository.setGoogleEmail(normalizedEmail)
+            observeUserDoc(normalizedEmail, deviceId)
+        }
+    }
+
     fun startAuthListening(deviceId: String) {
         val currentModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
         addDbLog("startAuthListening: deviceId=$deviceId, Model=$currentModel")
         viewModelScope.launch {
             googleEmail.collect { email ->
-                authListenerRegistration?.remove()
-                usersListenerRegistration?.remove()
-
                 if (email.isNullOrEmpty()) {
                     addDbLog("No user signed in. State -> NOT_LOGGED_IN")
+                    authListenerRegistration?.remove()
+                    authListenerRegistration = null
+                    usersListenerRegistration?.remove()
+                    usersListenerRegistration = null
                     _authState.value = AuthState.NOT_LOGGED_IN
                     _isAdmin.value = false
                 } else {
-                    val normalizedEmail = email.trim().lowercase()
-                    if (currentSessionToken == null) {
-                        currentSessionToken = java.util.UUID.randomUUID().toString()
-                    }
-                    val activeSessionToken = currentSessionToken ?: java.util.UUID.randomUUID().toString().also { currentSessionToken = it }
-                    val docRef = firestore.collection("dasmo_scanner_users").document(normalizedEmail)
-                    val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
-                    val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
-
-                    addDbLog("Observing Firestore user doc: users/$normalizedEmail (isAdmin=$isAdminEmail)")
-
-                    authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
-                        if (e != null) {
-                            addDbLog("Firestore snapshot error for users/$normalizedEmail: ${e.message}")
-                            return@addSnapshotListener
-                        }
-                        if (snapshot != null && snapshot.exists()) {
-                            val rawApproved = snapshot.getBoolean("isApproved") ?: snapshot.getBoolean("dasmo_isApproved") ?: false
-                            val rawStatus = snapshot.getString("status") ?: snapshot.getString("dasmo_status") ?: "pending"
-                            val rawRole = snapshot.getString("role") ?: snapshot.getString("dasmo_role") ?: if (isAdminEmail) "admin" else "user"
-                            val rawDeviceId = snapshot.getString("deviceId") ?: snapshot.getString("dasmo_deviceId") ?: ""
-                            val rawDeviceModel = snapshot.getString("deviceModel") ?: ""
-                            val rawExpiry = snapshot.getLong("expiryTimestamp") ?: 0L
-                            val rawAdmin = isAdminEmail || rawRole == "admin" || (snapshot.getBoolean("isAdmin") ?: false) || (snapshot.getBoolean("dasmo_isAdmin") ?: false)
-
-                            val isApproved = rawApproved || rawStatus == "approved" || rawAdmin
-
-                            // 1. Strict Hardware Device Binding Check (One Account Per Physical Device)
-                            if (rawDeviceId.isNotEmpty() && rawDeviceId != safeDeviceId) {
-                                addDbLog("DEVICE MISMATCH: Account bound to '$rawDeviceModel' ($rawDeviceId). Current device is '$currentModel' ($safeDeviceId)")
-                                _authState.value = AuthState.DEVICE_MISMATCH
-                                _isAdmin.value = false
-                                return@addSnapshotListener
-                            }
-
-                            // If not yet bound to a device (first login or after admin unbinds), bind this physical device ONCE:
-                            if (rawDeviceId.isEmpty()) {
-                                docRef.update(
-                                    mapOf(
-                                        "deviceId" to safeDeviceId,
-                                        "dasmo_deviceId" to safeDeviceId,
-                                        "deviceModel" to currentModel
-                                    )
-                                )
-                            }
-
-                            if (rawAdmin) {
-                                addDbLog("Admin authenticated: $normalizedEmail on bound device. State -> APPROVED")
-                                _authState.value = AuthState.APPROVED
-                                _isAdmin.value = true
-                                if (usersListenerRegistration == null) {
-                                    listenToAllUsers()
-                                }
-                                if (scannedDocsListenerRegistration == null) {
-                                    startFirestoreSync()
-                                }
-                            } else {
-                                _isAdmin.value = false
-
-                                // 2. Admin Approval Verification
-                                if (!isApproved || rawStatus != "approved") {
-                                    addDbLog("AWAITING APPROVAL: User $normalizedEmail status is '$rawStatus' (isApproved=$isApproved). Access blocked.")
-                                    _authState.value = AuthState.PENDING_APPROVAL
-                                    return@addSnapshotListener
-                                }
-
-                                // 3. Expiration Check
-                                if (rawExpiry > 0L && System.currentTimeMillis() > rawExpiry) {
-                                    addDbLog("PLAN EXPIRED: Subscription ended for $normalizedEmail.")
-                                    _authState.value = AuthState.DEVICE_MISMATCH
-                                    return@addSnapshotListener
-                                }
-
-                                // 4. Approved & Device Matched: Full Access!
-                                addDbLog("ACCESS GRANTED: User $normalizedEmail approved on bound device ($safeDeviceId).")
-                                _authState.value = AuthState.APPROVED
-                                if (scannedDocsListenerRegistration == null) {
-                                    startFirestoreSync()
-                                }
-                            }
-                        } else {
-                            // User not registered in Firestore -> Create record ONCE
-                            addDbLog("Registering new user record in Firestore: users/$normalizedEmail")
-                            val userDoc = mapOf(
-                                "email" to normalizedEmail,
-                                "deviceId" to safeDeviceId,
-                                "dasmo_deviceId" to safeDeviceId,
-                                "deviceModel" to currentModel,
-                                "currentSessionToken" to activeSessionToken,
-                                "expiryTimestamp" to 0L,
-                                "registrationTimestamp" to System.currentTimeMillis(),
-                                "lastActiveTimestamp" to System.currentTimeMillis(),
-                                "isApproved" to isAdminEmail,
-                                "dasmo_isApproved" to isAdminEmail,
-                                "isAdmin" to isAdminEmail,
-                                "dasmo_isAdmin" to isAdminEmail,
-                                "role" to if (isAdminEmail) "admin" else "user",
-                                "dasmo_role" to if (isAdminEmail) "admin" else "user",
-                                "status" to if (isAdminEmail) "approved" else "pending",
-                                "dasmo_status" to if (isAdminEmail) "approved" else "pending",
-                                "appTag" to "dasmo_scanner"
-                            )
-                            docRef.set(userDoc, com.google.firebase.firestore.SetOptions.merge()).addOnSuccessListener {
-                                addDbLog("Registered record for $normalizedEmail.")
-                            }
-
-                            if (isAdminEmail) {
-                                _authState.value = AuthState.APPROVED
-                                _isAdmin.value = true
-                                if (usersListenerRegistration == null) {
-                                    listenToAllUsers()
-                                }
-                                if (scannedDocsListenerRegistration == null) {
-                                    startFirestoreSync()
-                                }
-                            } else {
-                                _authState.value = AuthState.PENDING_APPROVAL
-                                _isAdmin.value = false
-                            }
-                        }
-                    }
-
+                    observeUserDoc(email, deviceId)
                 }
             }
         }
     }
+
+    private fun observeUserDoc(email: String, deviceId: String) {
+        val currentModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
+        val normalizedEmail = email.trim().lowercase()
+        val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
+        val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
+
+        if (_authState.value == AuthState.NOT_LOGGED_IN) {
+            _authState.value = AuthState.LOADING
+        }
+
+        authListenerRegistration?.remove()
+
+        if (currentSessionToken == null) {
+            currentSessionToken = java.util.UUID.randomUUID().toString()
+        }
+        val activeSessionToken = currentSessionToken ?: java.util.UUID.randomUUID().toString().also { currentSessionToken = it }
+        val docRef = firestore.collection("dasmo_scanner_users").document(normalizedEmail)
+
+        addDbLog("Observing Firestore user doc: users/$normalizedEmail (isAdmin=$isAdminEmail)")
+
+        authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
+            if (e != null) {
+                addDbLog("Firestore snapshot error for users/$normalizedEmail: ${e.message}")
+                return@addSnapshotListener
+            }
+            if (snapshot != null && snapshot.exists()) {
+                val rawApproved = snapshot.getBoolean("isApproved") ?: snapshot.getBoolean("dasmo_isApproved") ?: false
+                val rawStatus = snapshot.getString("status") ?: snapshot.getString("dasmo_status") ?: "pending"
+                val rawRole = snapshot.getString("role") ?: snapshot.getString("dasmo_role") ?: if (isAdminEmail) "admin" else "user"
+                val rawDeviceId = snapshot.getString("deviceId") ?: snapshot.getString("dasmo_deviceId") ?: ""
+                val rawDeviceModel = snapshot.getString("deviceModel") ?: ""
+                val rawExpiry = snapshot.getLong("expiryTimestamp") ?: 0L
+                val rawAdmin = isAdminEmail || rawRole == "admin" || (snapshot.getBoolean("isAdmin") ?: false) || (snapshot.getBoolean("dasmo_isAdmin") ?: false)
+
+                val isApproved = rawApproved || rawStatus == "approved" || rawAdmin
+
+                // 1. Strict Hardware Device Binding Check (One Account Per Physical Device)
+                if (rawDeviceId.isNotEmpty() && rawDeviceId != safeDeviceId) {
+                    addDbLog("DEVICE MISMATCH: Account bound to '$rawDeviceModel' ($rawDeviceId). Current device is '$currentModel' ($safeDeviceId)")
+                    _authState.value = AuthState.DEVICE_MISMATCH
+                    _isAdmin.value = false
+                    return@addSnapshotListener
+                }
+
+                // If not yet bound to a device (first login or after admin unbinds), bind this physical device ONCE:
+                if (rawDeviceId.isEmpty()) {
+                    docRef.update(
+                        mapOf(
+                            "deviceId" to safeDeviceId,
+                            "dasmo_deviceId" to safeDeviceId,
+                            "deviceModel" to currentModel
+                        )
+                    )
+                }
+
+                if (rawAdmin) {
+                    addDbLog("Admin authenticated: $normalizedEmail on bound device. State -> APPROVED")
+                    _authState.value = AuthState.APPROVED
+                    _isAdmin.value = true
+                    if (usersListenerRegistration == null) {
+                        listenToAllUsers()
+                    }
+                    if (scannedDocsListenerRegistration == null) {
+                        startFirestoreSync()
+                    }
+                } else {
+                    _isAdmin.value = false
+
+                    // 2. Admin Approval Verification
+                    if (!isApproved || rawStatus != "approved") {
+                        addDbLog("AWAITING APPROVAL: User $normalizedEmail status is '$rawStatus' (isApproved=$isApproved). Access blocked.")
+                        _authState.value = AuthState.PENDING_APPROVAL
+                        return@addSnapshotListener
+                    }
+
+                    // 3. Expiration Check
+                    if (rawExpiry > 0L && System.currentTimeMillis() > rawExpiry) {
+                        addDbLog("PLAN EXPIRED: Subscription ended for $normalizedEmail.")
+                        _authState.value = AuthState.DEVICE_MISMATCH
+                        return@addSnapshotListener
+                    }
+
+                    // 4. Approved & Device Matched: Full Access!
+                    addDbLog("ACCESS GRANTED: User $normalizedEmail approved on bound device ($safeDeviceId).")
+                    _authState.value = AuthState.APPROVED
+                    if (scannedDocsListenerRegistration == null) {
+                        startFirestoreSync()
+                    }
+                }
+            } else {
+                // User not registered in Firestore -> Create record ONCE
+                addDbLog("Registering new user record in Firestore: users/$normalizedEmail")
+                val userDoc = mapOf(
+                    "email" to normalizedEmail,
+                    "deviceId" to safeDeviceId,
+                    "dasmo_deviceId" to safeDeviceId,
+                    "deviceModel" to currentModel,
+                    "currentSessionToken" to activeSessionToken,
+                    "expiryTimestamp" to 0L,
+                    "registrationTimestamp" to System.currentTimeMillis(),
+                    "lastActiveTimestamp" to System.currentTimeMillis(),
+                    "isApproved" to isAdminEmail,
+                    "dasmo_isApproved" to isAdminEmail,
+                    "isAdmin" to isAdminEmail,
+                    "dasmo_isAdmin" to isAdminEmail,
+                    "role" to if (isAdminEmail) "admin" else "user",
+                    "dasmo_role" to if (isAdminEmail) "admin" else "user",
+                    "status" to if (isAdminEmail) "approved" else "pending",
+                    "dasmo_status" to if (isAdminEmail) "approved" else "pending",
+                    "appTag" to "dasmo_scanner"
+                )
+                docRef.set(userDoc, com.google.firebase.firestore.SetOptions.merge()).addOnSuccessListener {
+                    addDbLog("Registered record for $normalizedEmail.")
+                }
+
+                if (isAdminEmail) {
+                    _authState.value = AuthState.APPROVED
+                    _isAdmin.value = true
+                    if (usersListenerRegistration == null) {
+                        listenToAllUsers()
+                    }
+                    if (scannedDocsListenerRegistration == null) {
+                        startFirestoreSync()
+                    }
+                } else {
+                    _authState.value = AuthState.PENDING_APPROVAL
+                    _isAdmin.value = false
+                }
+            }
+        }
+    }
+
 
     private fun listenToAllUsers() {
         usersListenerRegistration?.remove()

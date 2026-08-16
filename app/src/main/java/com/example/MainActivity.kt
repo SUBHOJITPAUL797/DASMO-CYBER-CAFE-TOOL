@@ -252,8 +252,8 @@ fun MainScreen(viewModel: HomeViewModel) {
             val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
             try {
                 val account = task.getResult(ApiException::class.java)
-                if (account != null) {
-                    viewModel.setGoogleEmail(account.email)
+                if (account != null && !account.email.isNullOrBlank()) {
+                    viewModel.loginUser(account.email!!, deviceId)
                     Toast.makeText(context, "Signed in as ${account.email}", Toast.LENGTH_SHORT).show()
                     if (account.idToken != null) {
                         val credential = com.google.firebase.auth.GoogleAuthProvider.getCredential(account.idToken, null)
@@ -427,6 +427,7 @@ fun MainScreen(viewModel: HomeViewModel) {
                     viewModel.clearDbLogs()
                 }
             },
+            userEmail = googleEmail,
             dbLogs = dbLogs,
             onClearLogs = { viewModel.clearDbLogs() },
             onRunDiagnostics = { viewModel.runDiagnostics() }
