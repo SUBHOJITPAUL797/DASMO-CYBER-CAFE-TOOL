@@ -7,10 +7,12 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -64,8 +66,9 @@ fun AdminDashboardScreen(
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
-    val pendingUsers = allUsers.filter { it.status == "pending" && !it.isAdmin }
+    val pendingUsers = allUsers.filter { it.status == "pending" && !it.isApproved && !it.isAdmin }
     val approvedUsers = allUsers.filter { it.isApproved && !it.isAdmin }
+    val revokedUsers = allUsers.filter { (it.status == "rejected" || it.status == "declined" || (!it.isApproved && it.status != "pending")) && !it.isAdmin }
     val admins = allUsers.filter { it.isAdmin }
 
     val filteredUsers = allUsers.filter { user ->
@@ -74,8 +77,9 @@ fun AdminDashboardScreen(
                 user.deviceId.contains(searchQuery, ignoreCase = true)
 
         val matchesFilter = when (selectedFilter) {
-            "PENDING" -> user.status == "pending" && !user.isAdmin
+            "PENDING" -> user.status == "pending" && !user.isApproved && !user.isAdmin
             "APPROVED" -> user.isApproved && !user.isAdmin
+            "REVOKED" -> (user.status == "rejected" || user.status == "declined" || (!user.isApproved && user.status != "pending")) && !user.isAdmin
             "ADMINS" -> user.isAdmin
             else -> true
         }
@@ -167,6 +171,7 @@ fun AdminDashboardScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -175,28 +180,35 @@ fun AdminDashboardScreen(
                     count = allUsers.size,
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     textColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Pending",
                     count = pendingUsers.size,
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    textColor = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.weight(1f)
+                    color = Color(0xFFFFF3E0),
+                    textColor = Color(0xFFE65100),
+                    modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Approved",
                     count = approvedUsers.size,
-                    color = MaterialTheme.colorScheme.secondaryContainer,
-                    textColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    modifier = Modifier.weight(1f)
+                    color = Color(0xFFE8F5E9),
+                    textColor = Color(0xFF2E7D32),
+                    modifier = Modifier.width(85.dp)
+                )
+                StatCard(
+                    title = "Revoked",
+                    count = revokedUsers.size,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    textColor = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Admins",
                     count = admins.size,
                     color = MaterialTheme.colorScheme.primaryContainer,
                     textColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.width(85.dp)
                 )
             }
 
@@ -224,6 +236,7 @@ fun AdminDashboardScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -241,6 +254,11 @@ fun AdminDashboardScreen(
                     selected = selectedFilter == "APPROVED",
                     onClick = { selectedFilter = "APPROVED" },
                     label = { Text("Approved (${approvedUsers.size})") }
+                )
+                FilterChip(
+                    selected = selectedFilter == "REVOKED",
+                    onClick = { selectedFilter = "REVOKED" },
+                    label = { Text("Revoked (${revokedUsers.size})") }
                 )
                 FilterChip(
                     selected = selectedFilter == "ADMINS",
@@ -489,6 +507,8 @@ fun AdminUserCard(
 ) {
     val sdf = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
     val isExpired = user.expiryTimestamp > 0L && System.currentTimeMillis() > user.expiryTimestamp
+    val isRevoked = !user.isAdmin && (user.status == "rejected" || user.status == "declined" || (!user.isApproved && user.status != "pending"))
+    val isPending = !user.isAdmin && user.status == "pending" && !user.isApproved
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -496,6 +516,8 @@ fun AdminUserCard(
             containerColor = when {
                 user.isAdmin -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
                 isExpired -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                isRevoked -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.12f)
+                isPending -> Color(0xFFFFF3E0).copy(alpha = 0.8f)
                 user.isApproved -> MaterialTheme.colorScheme.surface
                 else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
             }
@@ -506,6 +528,8 @@ fun AdminUserCard(
             when {
                 user.isAdmin -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
                 isExpired -> MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                isRevoked -> MaterialTheme.colorScheme.error.copy(alpha = 0.3f)
+                isPending -> Color(0xFFE65100).copy(alpha = 0.4f)
                 user.isApproved -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                 else -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f)
             }
@@ -526,7 +550,9 @@ fun AdminUserCard(
                         .background(
                             when {
                                 user.isAdmin -> MaterialTheme.colorScheme.primary
-                                user.isApproved -> MaterialTheme.colorScheme.secondary
+                                user.isApproved -> Color(0xFF2E7D32)
+                                isRevoked -> MaterialTheme.colorScheme.error
+                                isPending -> Color(0xFFE65100)
                                 else -> MaterialTheme.colorScheme.tertiary
                             }
                         )
@@ -560,11 +586,15 @@ fun AdminUserCard(
                                 Text("EXPIRED", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             }
                         } else if (user.isApproved) {
-                            Badge(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer) {
+                            Badge(containerColor = Color(0xFF2E7D32), contentColor = Color.White) {
                                 Text("APPROVED", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             }
+                        } else if (isRevoked) {
+                            Badge(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError) {
+                                Text("REVOKED / BLOCKED", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
                         } else {
-                            Badge(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
+                            Badge(containerColor = Color(0xFFE65100), contentColor = Color.White) {
                                 Text("PENDING APPROVAL", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
                             }
                         }
@@ -662,73 +692,109 @@ fun AdminUserCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!user.isApproved || user.status == "pending") {
-                        // Quick 1-Click Approve / Decline
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            OutlinedButton(
-                                onClick = onDecline,
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier.height(34.dp).weight(1f)
+                    when {
+                        isPending -> {
+                            // Quick 1-Click Approve / Decline / Delete
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Reject", fontSize = 12.sp)
-                            }
-                            Button(
-                                onClick = onApprove,
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                modifier = Modifier.height(34.dp).weight(1f)
-                            ) {
-                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Approve", fontSize = 12.sp)
+                                OutlinedButton(
+                                    onClick = onDecline,
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp).weight(1f)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Decline", fontSize = 12.sp)
+                                }
+                                Button(
+                                    onClick = onApprove,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp).weight(1f)
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Approve", fontSize = 12.sp)
+                                }
+                                IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                                }
                             }
                         }
-                    } else {
-                        // Switch toggle
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "Access:",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Switch(
-                                checked = user.isApproved,
-                                onCheckedChange = { onToggleApproval() },
-                                thumbContent = {
+                        isRevoked -> {
+                            // Revoked state -> Can Re-Approve or Permanently Delete
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Button(
+                                    onClick = onApprove,
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp).weight(1f)
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Re-Approve", fontSize = 12.sp)
+                                }
+                                OutlinedButton(
+                                    onClick = onDelete,
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp).weight(1f)
+                                ) {
+                                    Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Delete Permanently", fontSize = 12.sp)
+                                }
+                            }
+                        }
+                        else -> {
+                            // Active approved user -> Switch toggle + Set Expiry + Delete
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Access Active:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Switch(
+                                    checked = user.isApproved,
+                                    onCheckedChange = { onToggleApproval() },
+                                    thumbContent = {
+                                        Icon(
+                                            imageVector = if (user.isApproved) Icons.Default.Check else Icons.Default.Close,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                )
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                IconButton(onClick = onSetExpiry, modifier = Modifier.size(34.dp)) {
                                     Icon(
-                                        imageVector = if (user.isApproved) Icons.Default.Check else Icons.Default.Close,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp)
+                                        imageVector = Icons.Default.AccessTime,
+                                        contentDescription = "Set Expiry",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
-                            )
-                        }
-
-                        // Duration / Delete buttons
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            IconButton(onClick = onSetExpiry, modifier = Modifier.size(34.dp)) {
-                                Icon(
-                                    imageVector = Icons.Default.AccessTime,
-                                    contentDescription = "Set Expiry",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                            IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
-                                Icon(
-                                    imageVector = Icons.Default.DeleteOutline,
-                                    contentDescription = "Delete User",
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                                IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "Delete User",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -737,6 +803,7 @@ fun AdminUserCard(
         }
     }
 }
+
 
 @Composable
 fun StatCard(
