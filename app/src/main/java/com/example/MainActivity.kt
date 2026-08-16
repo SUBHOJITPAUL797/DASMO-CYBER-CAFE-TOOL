@@ -253,20 +253,19 @@ fun MainScreen(viewModel: HomeViewModel) {
             try {
                 val account = task.getResult(ApiException::class.java)
                 if (account != null) {
-                    val credential = com.google.firebase.auth.GoogleAuthProvider.getCredential(account.idToken, null)
-                    com.google.firebase.auth.FirebaseAuth.getInstance().signInWithCredential(credential)
-                        .addOnCompleteListener { authTask ->
-                            if (authTask.isSuccessful) {
-                                viewModel.setGoogleEmail(account.email)
-                                Toast.makeText(context, "Connected to ${account.email}", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(context, "Firebase Auth failed: ${authTask.exception?.message}", Toast.LENGTH_LONG).show()
+                    viewModel.setGoogleEmail(account.email)
+                    Toast.makeText(context, "Signed in as ${account.email}", Toast.LENGTH_SHORT).show()
+                    if (account.idToken != null) {
+                        val credential = com.google.firebase.auth.GoogleAuthProvider.getCredential(account.idToken, null)
+                        com.google.firebase.auth.FirebaseAuth.getInstance().signInWithCredential(credential)
+                            .addOnFailureListener { e ->
+                                android.util.Log.e("MainActivity", "Firebase Auth credential sign-in error", e)
                             }
-                        }
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                Toast.makeText(context, "Connection failed: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Connection failed: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
             }
         } else {
             val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)

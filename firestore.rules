@@ -1,0 +1,17 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /dasmo_photo_print_users/{email} {
+      allow read, write: if true;
+    }
+    match /dasmo_scanner_users/{email} {
+      allow read, write: if true;
+    }
+    match /users/{email} {
+      allow read, write: if true;
+    }
+    match /dasmo_doc_scanner_documents/{documentId} {
+      allow read, write: if true;
+    }
+  }
+}

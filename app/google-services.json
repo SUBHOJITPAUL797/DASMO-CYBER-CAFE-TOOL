@@ -22,6 +22,14 @@
           }
         },
         {
+          "client_id": "490633569828-ll6c15sso4ikjdghrmrc6n852rpccfs3.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "dasmocybercafe.photoprint.subhojit",
+            "certificate_hash": "417b5c19b564f306e2edceda59a335a001d3185d"
+          }
+        },
+        {
           "client_id": "490633569828-3aijs7dkvm6n1b3f18g0oalkbtf141b4.apps.googleusercontent.com",
           "client_type": 3
         }
@@ -50,6 +58,14 @@
         }
       },
       "oauth_client": [
+        {
+          "client_id": "490633569828-oe5nlpk036pk03p3q5t5r24190cmi3in.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "tools.subhojit.dasmo",
+            "certificate_hash": "417b5c19b564f306e2edceda59a335a001d3185d"
+          }
+        },
         {
           "client_id": "490633569828-u96c2uqbh73o1ah21kpcduhsr0djj3og.apps.googleusercontent.com",
           "client_type": 1,
