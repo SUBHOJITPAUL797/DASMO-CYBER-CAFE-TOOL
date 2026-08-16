@@ -5,33 +5,37 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.ui.AppUser
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.border
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import android.widget.Toast
+import java.text.SimpleDateFormat
+import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,20 +44,44 @@ fun AdminDashboardScreen(
     onApprove: (String) -> Unit,
     onDecline: (String) -> Unit,
     onToggleApproval: (String, Boolean) -> Unit,
+    onResetDevice: (String) -> Unit = {},
+    onDeleteUser: (String) -> Unit = {},
+    onUpdateExpiry: (String, Long) -> Unit = { _, _ -> },
+    onCreateUser: (String, String, String, Long) -> Unit = { _, _, _, _ -> },
     statusMessage: String,
     onClearStatus: () -> Unit,
     onRunDiagnostics: () -> Unit = {},
     dbLogs: List<String> = emptyList(),
     onClearLogs: () -> Unit = {}
 ) {
-    var selectedTab by remember { mutableStateOf(0) } // 0 = Pending, 1 = All Users
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf("ALL") } // ALL, PENDING, APPROVED, ADMINS
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var userToResetDevice by remember { mutableStateOf<AppUser?>(null) }
+    var userToDelete by remember { mutableStateOf<AppUser?>(null) }
+    var userToSetExpiry by remember { mutableStateOf<AppUser?>(null) }
+
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
-    val pendingUsers = allUsers.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
+
+    val pendingUsers = allUsers.filter { it.status == "pending" && !it.isAdmin }
     val approvedUsers = allUsers.filter { it.isApproved && !it.isAdmin }
     val admins = allUsers.filter { it.isAdmin }
 
-    // Snackbar or Banner for Status Messages
+    val filteredUsers = allUsers.filter { user ->
+        val matchesQuery = user.email.contains(searchQuery, ignoreCase = true) ||
+                user.deviceModel.contains(searchQuery, ignoreCase = true) ||
+                user.deviceId.contains(searchQuery, ignoreCase = true)
+
+        val matchesFilter = when (selectedFilter) {
+            "PENDING" -> user.status == "pending" && !user.isAdmin
+            "APPROVED" -> user.isApproved && !user.isAdmin
+            "ADMINS" -> user.isAdmin
+            else -> true
+        }
+        matchesQuery && matchesFilter
+    }
+
     LaunchedEffect(statusMessage) {
         if (statusMessage.isNotEmpty()) {
             kotlinx.coroutines.delay(4000)
@@ -61,393 +89,816 @@ fun AdminDashboardScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        // App Header
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f))
-                .padding(vertical = 24.dp, horizontal = 16.dp)
-        ) {
-            Column {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
                     Column {
                         Text(
-                            text = "Admin Dashboard",
-                            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
-                            color = MaterialTheme.colorScheme.onBackground
+                            text = "Admin Security Control",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
                         )
                         Text(
-                            text = "Security, Access, and Device Authorizations",
-                            style = MaterialTheme.typography.bodySmall,
+                            text = "Manage Users, Hardware Lock & Approvals",
+                            style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = onRunDiagnostics) {
-                            Icon(
-                                imageVector = Icons.Default.BugReport,
-                                contentDescription = "Run Diagnostics",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
+                },
+                actions = {
+                    IconButton(onClick = { showCreateDialog = true }) {
                         Icon(
-                            imageVector = Icons.Default.Shield,
-                            contentDescription = "Shield",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(36.dp)
+                            imageVector = Icons.Default.PersonAdd,
+                            contentDescription = "Pre-Approve User",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Stats Cards
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    StatCard(
-                        title = "Pending",
-                        count = pendingUsers.size,
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        textColor = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatCard(
-                        title = "Approved",
-                        count = approvedUsers.size,
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        textColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatCard(
-                        title = "Admins",
-                        count = admins.size,
-                        color = MaterialTheme.colorScheme.tertiaryContainer,
-                        textColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        // Notification Banner
-        AnimatedVisibility(
-            visible = statusMessage.isNotEmpty(),
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.inverseSurface)
-                    .padding(12.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = statusMessage,
-                        color = MaterialTheme.colorScheme.inverseOnSurface,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(
-                        onClick = onClearStatus,
-                        modifier = Modifier.size(24.dp)
-                    ) {
+                    IconButton(onClick = onRunDiagnostics) {
                         Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Dismiss",
-                            tint = MaterialTheme.colorScheme.inverseOnSurface,
-                            modifier = Modifier.size(16.dp)
+                            imageVector = Icons.Default.BugReport,
+                            contentDescription = "Run Diagnostics",
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
-                }
-            }
-        }
-
-        // Tab Selector / Segmented Buttons
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = MaterialTheme.colorScheme.surface,
-            contentColor = MaterialTheme.colorScheme.primary
-        ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PendingActions,
-                            contentDescription = "Pending Requests",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Requests (${pendingUsers.size})",
-                            fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.PeopleAlt,
-                            contentDescription = "All Users",
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Directory (${allUsers.size})",
-                            fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
-                }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
             )
         }
-
-        // User lists
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 16.dp)
-        ) {
-            if (selectedTab == 0) {
-                if (pendingUsers.isEmpty()) {
-                    EmptyStateView(
-                        icon = Icons.Default.CheckCircleOutline,
-                        title = "All Caught Up!",
-                        description = "There are no pending user registration requests in Firestore right now."
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(pendingUsers) { user ->
-                            PendingUserCard(
-                                user = user,
-                                onApprove = { onApprove(user.email) },
-                                onDecline = { onDecline(user.email) }
-                            )
-                        }
-                    }
-                }
-            } else {
-                if (allUsers.isEmpty()) {
-                    EmptyStateView(
-                        icon = Icons.Default.People,
-                        title = "No Users",
-                        description = "No registered users could be found in the database."
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(allUsers) { user ->
-                            DirectoryUserCard(
-                                user = user,
-                                onToggleApproval = { onToggleApproval(user.email, user.isApproved) },
-                                onRevoke = { onDecline(user.email) }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Collapsible Firebase / Firestore Diagnostic Logger
-        var logsExpanded by remember { mutableStateOf(false) } // Default collapsed on dashboard to save space
-        val lazyListState = rememberLazyListState()
-
-        // Auto-scroll to latest log line
-        LaunchedEffect(dbLogs.size) {
-            if (dbLogs.isNotEmpty()) {
-                lazyListState.animateScrollToItem(dbLogs.size - 1)
-            }
-        }
-
+    ) { innerPadding ->
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp)
+                .fillMaxSize()
+                .padding(innerPadding)
+                .background(MaterialTheme.colorScheme.background)
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable { logsExpanded = !logsExpanded }
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Status Notification
+            AnimatedVisibility(
+                visible = statusMessage.isNotEmpty(),
+                enter = fadeIn(),
+                exit = fadeOut()
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Terminal,
-                        contentDescription = "Terminal",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Firebase Diagnostic Console",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (logsExpanded) {
-                    Icon(
-                        imageVector = Icons.Default.ExpandLess,
-                        contentDescription = "Collapse",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.ExpandMore,
-                        contentDescription = "Expand",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            AnimatedVisibility(visible = logsExpanded) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(
-                            width = 1.dp,
-                            color = MaterialTheme.colorScheme.outlineVariant,
-                            shape = RoundedCornerShape(bottomStart = 12.dp, bottomEnd = 12.dp)
-                        )
-                        .background(Color(0xFF1E1E1E))
-                        .padding(12.dp)
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "LIVE FIRESTORE TRANSACTION FLOW:",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp
-                            ),
-                            color = Color(0xFFAAAAAA)
+                            text = statusMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.weight(1f)
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(
-                                onClick = onRunDiagnostics,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(26.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF4CAF50))
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Run Test",
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Test Conn", fontSize = 10.sp)
+                        IconButton(onClick = onClearStatus, modifier = Modifier.size(20.dp)) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Stats Cards Grid
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatCard(
+                    title = "Total",
+                    count = allUsers.size,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                StatCard(
+                    title = "Pending",
+                    count = pendingUsers.size,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    textColor = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.weight(1f)
+                )
+                StatCard(
+                    title = "Approved",
+                    count = approvedUsers.size,
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    textColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+                StatCard(
+                    title = "Admins",
+                    count = admins.size,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    textColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Search Bar
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search by email or device model...") },
+                leadingIcon = { Icon(imageVector = Icons.Default.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { searchQuery = "" }) {
+                            Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear")
+                        }
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            )
+
+            // Filter Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = selectedFilter == "ALL",
+                    onClick = { selectedFilter = "ALL" },
+                    label = { Text("All (${allUsers.size})") }
+                )
+                FilterChip(
+                    selected = selectedFilter == "PENDING",
+                    onClick = { selectedFilter = "PENDING" },
+                    label = { Text("Pending (${pendingUsers.size})") }
+                )
+                FilterChip(
+                    selected = selectedFilter == "APPROVED",
+                    onClick = { selectedFilter = "APPROVED" },
+                    label = { Text("Approved (${approvedUsers.size})") }
+                )
+                FilterChip(
+                    selected = selectedFilter == "ADMINS",
+                    onClick = { selectedFilter = "ADMINS" },
+                    label = { Text("Admins (${admins.size})") }
+                )
+            }
+
+            // Users List
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 16.dp)
+            ) {
+                if (filteredUsers.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PeopleOutline,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Text(
+                                text = if (searchQuery.isNotEmpty()) "No matching users found" else "No users registered yet",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(filteredUsers, key = { it.email }) { user ->
+                            AdminUserCard(
+                                user = user,
+                                onApprove = { onApprove(user.email) },
+                                onDecline = { onDecline(user.email) },
+                                onToggleApproval = { onToggleApproval(user.email, user.isApproved) },
+                                onResetDevice = { userToResetDevice = user },
+                                onSetExpiry = { userToSetExpiry = user },
+                                onDelete = { userToDelete = user }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Collapsible Firebase / Firestore Diagnostic Logger
+            var logsExpanded by remember { mutableStateOf(false) }
+            val lazyListState = rememberLazyListState()
+
+            LaunchedEffect(dbLogs.size) {
+                if (dbLogs.isNotEmpty()) {
+                    lazyListState.animateScrollToItem(dbLogs.size - 1)
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { logsExpanded = !logsExpanded }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = "Terminal",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Firebase Diagnostic Console (${dbLogs.size})",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Icon(
+                        imageVector = if (logsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = "Toggle Logs",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                AnimatedVisibility(visible = logsExpanded) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF1E1E1E))
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "LIVE FIRESTORE TRANSACTIONS:",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp
+                                ),
+                                color = Color(0xFFAAAAAA)
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(
+                                    onClick = onRunDiagnostics,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF4CAF50))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "Run Test",
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Test Conn", fontSize = 10.sp)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        val textToCopy = dbLogs.joinToString("\n")
+                                        clipboardManager.setText(AnnotatedString(textToCopy))
+                                        Toast.makeText(context, "Logs copied!", Toast.LENGTH_SHORT).show()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF64B5F6))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = "Copy",
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Copy", fontSize = 10.sp)
+                                }
+                                TextButton(
+                                    onClick = onClearLogs,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFE57373))
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.ClearAll,
+                                        contentDescription = "Clear",
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Clear", fontSize = 10.sp)
+                                }
                             }
-                            TextButton(
-                                onClick = {
-                                    val textToCopy = dbLogs.joinToString("\n")
-                                    clipboardManager.setText(AnnotatedString(textToCopy))
-                                    Toast.makeText(context, "Diagnostic logs copied to clipboard!", Toast.LENGTH_SHORT).show()
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(26.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFF64B5F6))
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ContentCopy,
-                                    contentDescription = "Copy Logs",
-                                    modifier = Modifier.size(12.dp)
+                        }
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(120.dp)
+                                .background(Color(0xFF121212), shape = RoundedCornerShape(6.dp))
+                                .padding(8.dp)
+                        ) {
+                            if (dbLogs.isEmpty()) {
+                                Text(
+                                    text = "Ready. Logs will appear here in real-time.",
+                                    style = TextStyle(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF888888)
+                                    )
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Copy", fontSize = 10.sp)
-                            }
-                            TextButton(
-                                onClick = onClearLogs,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                modifier = Modifier.height(26.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFE57373))
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ClearAll,
-                                    contentDescription = "Clear",
-                                    modifier = Modifier.size(12.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Clear", fontSize = 10.sp)
+                            } else {
+                                LazyColumn(
+                                    state = lazyListState,
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    items(dbLogs) { log ->
+                                        val color = when {
+                                            log.contains("ERROR", true) || log.contains("MISMATCH", true) -> Color(0xFFEF5350)
+                                            log.contains("SUCCESS", true) || log.contains("GRANTED", true) || log.contains("APPROVED", true) -> Color(0xFF66BB6A)
+                                            log.contains("PENDING", true) -> Color(0xFFFFB74D)
+                                            else -> Color(0xFFE0E0E0)
+                                        }
+                                        Text(
+                                            text = log,
+                                            style = TextStyle(
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 11.sp,
+                                                color = color
+                                            )
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(130.dp)
-                            .background(Color(0xFF121212), shape = RoundedCornerShape(6.dp))
-                            .border(1.dp, Color(0xFF2C2C2C), shape = RoundedCornerShape(6.dp))
-                            .padding(8.dp)
+    // Pre-Approve User Dialog
+    if (showCreateDialog) {
+        var emailInput by remember { mutableStateOf("") }
+        var selectedRole by remember { mutableStateOf("user") }
+        var selectedDays by remember { mutableStateOf("30") }
+
+        AlertDialog(
+            onDismissRequest = { showCreateDialog = false },
+            title = {
+                Text("Pre-Approve New User", fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Enter the user's Google email address. Once created, they will be instantly approved on the first device they log into.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = emailInput,
+                        onValueChange = { emailInput = it },
+                        label = { Text("Google Account Email") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        if (dbLogs.isEmpty()) {
-                            Text(
-                                text = "Ready. Diagnostic traces from user registrations and approvals will appear here.",
-                                style = androidx.compose.ui.text.TextStyle(
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF888888)
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                        OutlinedButton(
+                            onClick = { selectedRole = if (selectedRole == "admin") "user" else "admin" },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Role: ${selectedRole.uppercase()}")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                selectedDays = when (selectedDays) {
+                                    "7" -> "30"
+                                    "30" -> "90"
+                                    "90" -> "365"
+                                    "365" -> "0"
+                                    else -> "7"
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (selectedDays == "0") "Lifetime" else "$selectedDays Days")
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (emailInput.isNotBlank() && emailInput.contains("@")) {
+                            val days = selectedDays.toLongOrNull() ?: 0L
+                            val expiry = if (days > 0) System.currentTimeMillis() + (days * 24 * 60 * 60 * 1000L) else 0L
+                            onCreateUser(emailInput, selectedRole, "approved", expiry)
+                            showCreateDialog = false
                         } else {
-                            LazyColumn(
-                                state = lazyListState,
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            Toast.makeText(context, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("Pre-Approve")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Reset Device Binding Dialog
+    if (userToResetDevice != null) {
+        val user = userToResetDevice!!
+        AlertDialog(
+            onDismissRequest = { userToResetDevice = null },
+            icon = { Icon(imageVector = Icons.Default.PhoneAndroid, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Reset Device Binding?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "This will disconnect '${user.email}' from their currently registered device (${user.deviceModel.ifEmpty { user.deviceId.take(12) }}). They will be able to bind and log in from a new phone upon approval."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onResetDevice(user.email)
+                        userToResetDevice = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Unbind Device")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { userToResetDevice = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Set Expiry Plan Dialog
+    if (userToSetExpiry != null) {
+        val user = userToSetExpiry!!
+        AlertDialog(
+            onDismissRequest = { userToSetExpiry = null },
+            icon = { Icon(imageVector = Icons.Default.AccessTime, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Set Access Duration", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Select how long '${user.email}' should have access before needing renewal:")
+                    val options = listOf(
+                        "7 Days" to (7L * 24 * 60 * 60 * 1000L),
+                        "30 Days (1 Month)" to (30L * 24 * 60 * 60 * 1000L),
+                        "90 Days (3 Months)" to (90L * 24 * 60 * 60 * 1000L),
+                        "1 Year (365 Days)" to (365L * 24 * 60 * 60 * 1000L),
+                        "Lifetime Access" to 0L
+                    )
+                    options.forEach { (label, duration) ->
+                        OutlinedButton(
+                            onClick = {
+                                val timestamp = if (duration > 0L) System.currentTimeMillis() + duration else 0L
+                                onUpdateExpiry(user.email, timestamp)
+                                userToSetExpiry = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { userToSetExpiry = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Delete User Dialog
+    if (userToDelete != null) {
+        val user = userToDelete!!
+        AlertDialog(
+            onDismissRequest = { userToDelete = null },
+            icon = { Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Delete User Account?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text("Are you sure you want to permanently delete '${user.email}' from the database? This action cannot be undone.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeleteUser(user.email)
+                        userToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { userToDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun AdminUserCard(
+    user: AppUser,
+    onApprove: () -> Unit,
+    onDecline: () -> Unit,
+    onToggleApproval: () -> Unit,
+    onResetDevice: () -> Unit,
+    onSetExpiry: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val sdf = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
+    val isExpired = user.expiryTimestamp > 0L && System.currentTimeMillis() > user.expiryTimestamp
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                user.isAdmin -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
+                isExpired -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                user.isApproved -> MaterialTheme.colorScheme.surface
+                else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+            }
+        ),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(
+            1.dp,
+            when {
+                user.isAdmin -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                isExpired -> MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                user.isApproved -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                else -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f)
+            }
+        )
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header Row
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                val initial = user.email.take(1).uppercase()
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(
+                            when {
+                                user.isAdmin -> MaterialTheme.colorScheme.primary
+                                user.isApproved -> MaterialTheme.colorScheme.secondary
+                                else -> MaterialTheme.colorScheme.tertiary
+                            }
+                        )
+                ) {
+                    Text(
+                        text = initial,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = user.email,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (user.isAdmin) {
+                            Badge(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary) {
+                                Text("SUPER ADMIN", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        } else if (isExpired) {
+                            Badge(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError) {
+                                Text("EXPIRED", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        } else if (user.isApproved) {
+                            Badge(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer) {
+                                Text("APPROVED", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        } else {
+                            Badge(containerColor = MaterialTheme.colorScheme.errorContainer, contentColor = MaterialTheme.colorScheme.onErrorContainer) {
+                                Text("PENDING APPROVAL", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        if (user.deviceModel.isNotBlank()) {
+                            Text(
+                                text = user.deviceModel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Hardware Device Binding Section
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhoneAndroid,
+                            contentDescription = null,
+                            tint = if (user.deviceId.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (user.deviceId.isNotBlank()) "Bound: ${user.deviceModel.ifEmpty { user.deviceId.take(12) }}" else "Hardware Device: Unbound",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (!user.isAdmin && user.deviceId.isNotBlank()) {
+                        TextButton(
+                            onClick = onResetDevice,
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(24.dp)
+                        ) {
+                            Text("Reset Lock", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            // Expiry & Activity Details
+            if (!user.isAdmin) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = if (user.expiryTimestamp > 0L) "Expires: ${sdf.format(Date(user.expiryTimestamp))}" else "Plan: Lifetime Access",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isExpired) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (user.lastActiveTimestamp > 0L) {
+                        Text(
+                            text = "Active: ${sdf.format(Date(user.lastActiveTimestamp))}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            if (!user.isAdmin) {
+                Spacer(modifier = Modifier.height(10.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Action Row
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (!user.isApproved || user.status == "pending") {
+                        // Quick 1-Click Approve / Decline
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            OutlinedButton(
+                                onClick = onDecline,
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(34.dp).weight(1f)
                             ) {
-                                items(dbLogs) { log ->
-                                    val color = when {
-                                        log.contains("ERROR", true) || log.contains("FAILED", true) || log.contains("DENIED", true) -> Color(0xFFEF5350)
-                                        log.contains("SUCCESS", true) || log.contains("GRANTED", true) || log.contains("approved successfully", true) -> Color(0xFF66BB6A)
-                                        log.contains("PENDING", true) || log.contains("Waiting", true) -> Color(0xFFFFB74D)
-                                        else -> Color(0xFFE0E0E0)
-                                    }
-                                    Text(
-                                        text = log,
-                                        style = androidx.compose.ui.text.TextStyle(
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 11.sp,
-                                            color = color
-                                        )
+                                Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Reject", fontSize = 12.sp)
+                            }
+                            Button(
+                                onClick = onApprove,
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                modifier = Modifier.height(34.dp).weight(1f)
+                            ) {
+                                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Approve", fontSize = 12.sp)
+                            }
+                        }
+                    } else {
+                        // Switch toggle
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Access:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Switch(
+                                checked = user.isApproved,
+                                onCheckedChange = { onToggleApproval() },
+                                thumbContent = {
+                                    Icon(
+                                        imageVector = if (user.isApproved) Icons.Default.Check else Icons.Default.Close,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp)
                                     )
                                 }
+                            )
+                        }
+
+                        // Duration / Delete buttons
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            IconButton(onClick = onSetExpiry, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = "Set Expiry",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            IconButton(onClick = onDelete, modifier = Modifier.size(34.dp)) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Delete User",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
                     }
@@ -473,310 +924,22 @@ fun StatCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .padding(10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelMedium,
+                style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Medium,
                 color = textColor.copy(alpha = 0.8f)
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = count.toString(),
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold,
                 color = textColor
             )
         }
-    }
-}
-
-@Composable
-fun PendingUserCard(
-    user: AppUser,
-    onApprove: () -> Unit,
-    onDecline: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // User Avatar Placeholder
-                val initial = user.email.take(1).uppercase()
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer)
-                ) {
-                    Text(
-                        text = initial,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = user.email,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Device: ${user.deviceId.ifEmpty { "Not bound yet" }}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    
-                    // Badges
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Badge(
-                            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f),
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer
-                        ) {
-                            Text("Pending Approval", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 10.sp)
-                        }
-                        Badge(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        ) {
-                            Text("Role: ${user.role}", modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp), fontSize = 10.sp)
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Action Buttons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onDecline,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Decline",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Decline", fontWeight = FontWeight.Bold)
-                }
-
-                Button(
-                    onClick = onApprove,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Approve",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Approve", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun DirectoryUserCard(
-    user: AppUser,
-    onToggleApproval: () -> Unit,
-    onRevoke: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = if (user.isAdmin) 
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f) 
-            else 
-                MaterialTheme.colorScheme.surface
-        ),
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(
-            1.dp, 
-            if (user.isAdmin) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) 
-            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-        )
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                val initial = user.email.take(1).uppercase()
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (user.isAdmin) MaterialTheme.colorScheme.primary 
-                            else MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
-                        )
-                ) {
-                    Text(
-                        text = initial,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = if (user.isAdmin) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = user.email,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = "Device: ${user.deviceId.ifEmpty { "None" }}",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                if (user.isAdmin) {
-                    Badge(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
-                    ) {
-                        Text("ADMIN", modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp), fontWeight = FontWeight.Bold)
-                    }
-                } else {
-                    Badge(
-                        containerColor = if (user.isApproved) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        contentColor = if (user.isApproved) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                    ) {
-                        Text(
-                            text = if (user.isApproved) "APPROVED" else "PENDING",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            if (!user.isAdmin) {
-                Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "Access State:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Switch(
-                            checked = user.isApproved,
-                            onCheckedChange = { onToggleApproval() },
-                            thumbContent = {
-                                if (user.isApproved) {
-                                    Icon(
-                                        imageVector = Icons.Default.Check,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Default.Close,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(12.dp)
-                                    )
-                                }
-                            }
-                        )
-                    }
-
-                    IconButton(
-                        onClick = onRevoke,
-                        colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DeleteOutline,
-                            contentDescription = "Revoke device & Reset"
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun EmptyStateView(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    description: String
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            modifier = Modifier.size(64.dp)
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = description,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-            textAlign = TextAlign.Center
-        )
     }
 }

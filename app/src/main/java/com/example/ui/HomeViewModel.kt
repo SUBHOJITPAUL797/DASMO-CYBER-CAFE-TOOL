@@ -85,10 +85,15 @@ enum class AuthState {
 data class AppUser(
     val email: String = "",
     val deviceId: String = "",
+    val deviceModel: String = "",
     val isApproved: Boolean = false,
     val isAdmin: Boolean = false,
     val role: String = "user",
-    val status: String = "pending"
+    val status: String = "pending",
+    val currentSessionToken: String = "",
+    val expiryTimestamp: Long = 0L,
+    val registrationTimestamp: Long = 0L,
+    val lastActiveTimestamp: Long = 0L
 )
 
 class HomeViewModel(
@@ -111,6 +116,8 @@ class HomeViewModel(
         } catch (e: Exception) {
             e.printStackTrace()
         }
+        authListenerRegistration?.remove()
+        usersListenerRegistration?.remove()
     }
 
     val documents = database.documentDao().getAllDocuments()
@@ -130,7 +137,7 @@ class HomeViewModel(
     private var usersListenerRegistration: ListenerRegistration? = null
     private var currentSessionToken: String? = null
 
-    private val _authState = MutableStateFlow(AuthState.APPROVED)
+    private val _authState = MutableStateFlow(AuthState.LOADING)
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
 
     private val _isAdmin = MutableStateFlow(false)
@@ -154,84 +161,131 @@ class HomeViewModel(
 
     fun startAuthListening(deviceId: String) {
         val currentModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
-        addDbLog("startAuthListening initialized. Current deviceId: $deviceId, DeviceModel: $currentModel")
+        addDbLog("startAuthListening: deviceId=$deviceId, Model=$currentModel")
         viewModelScope.launch {
             googleEmail.collect { email ->
                 authListenerRegistration?.remove()
                 usersListenerRegistration?.remove()
 
                 if (email.isNullOrEmpty()) {
-                    addDbLog("Public Access Enabled. State -> APPROVED")
-                    _authState.value = AuthState.APPROVED
+                    addDbLog("No user signed in. State -> NOT_LOGGED_IN")
+                    _authState.value = AuthState.NOT_LOGGED_IN
                     _isAdmin.value = false
-                    startFirestoreSync()
                 } else {
                     val normalizedEmail = email.trim().lowercase()
                     if (currentSessionToken == null) {
                         currentSessionToken = java.util.UUID.randomUUID().toString()
                     }
                     val activeSessionToken = currentSessionToken ?: java.util.UUID.randomUUID().toString().also { currentSessionToken = it }
-                    addDbLog("Google Account Active: $normalizedEmail. Auto-granting APPROVED access.")
-                    val docRef = firestore.collection("users").document(normalizedEmail)
+                    val docRef = firestore.collection("dasmo_scanner_users").document(normalizedEmail)
                     val isAdminEmail = normalizedEmail == "subhojitpaul26042004@gmail.com"
-
-                    // Auto-grant full access to any logged-in user without barrier
-                    _authState.value = AuthState.APPROVED
-                    _isAdmin.value = isAdminEmail
-                    if (isAdminEmail) listenToAllUsers()
-                    startFirestoreSync()
-
                     val safeDeviceId = if (deviceId.isNullOrBlank()) "unknown_device" else deviceId
+
+                    addDbLog("Observing Firestore user doc: users/$normalizedEmail (isAdmin=$isAdminEmail)")
 
                     authListenerRegistration = docRef.addSnapshotListener { snapshot, e ->
                         if (e != null) {
-                            addDbLog("Firestore snapshot notice for users/$normalizedEmail: ${e.message}")
+                            addDbLog("Firestore snapshot error for users/$normalizedEmail: ${e.message}")
                             return@addSnapshotListener
                         }
                         if (snapshot != null && snapshot.exists()) {
-                            addDbLog("Document users/$normalizedEmail exists in Firestore.")
-                            val savedSessionToken = snapshot.getString("currentSessionToken")
-                            val savedDeviceModel = snapshot.getString("deviceModel")
-                            val savedDeviceId = snapshot.getString("deviceId")
+                            val rawApproved = snapshot.getBoolean("isApproved") ?: snapshot.getBoolean("dasmo_isApproved") ?: false
+                            val rawStatus = snapshot.getString("status") ?: snapshot.getString("dasmo_status") ?: "pending"
+                            val rawRole = snapshot.getString("role") ?: snapshot.getString("dasmo_role") ?: if (isAdminEmail) "admin" else "user"
+                            val rawDeviceId = snapshot.getString("deviceId") ?: snapshot.getString("dasmo_deviceId") ?: ""
+                            val rawDeviceModel = snapshot.getString("deviceModel") ?: ""
+                            val rawExpiry = snapshot.getLong("expiryTimestamp") ?: 0L
+                            val rawAdmin = isAdminEmail || rawRole == "admin" || (snapshot.getBoolean("isAdmin") ?: false) || (snapshot.getBoolean("dasmo_isAdmin") ?: false)
 
-                            val needsUpdate = savedSessionToken != activeSessionToken ||
-                                    savedDeviceModel != currentModel ||
-                                    savedDeviceId != safeDeviceId
+                            val isApproved = rawApproved || rawStatus == "approved" || rawAdmin
 
-                            if (needsUpdate) {
-                                addDbLog("Updating session & device ID ($safeDeviceId) in Firestore...")
-                                val updates = mutableMapOf<String, Any>(
-                                    "email" to normalizedEmail,
-                                    "deviceId" to safeDeviceId,
-                                    "dasmo_deviceId" to safeDeviceId,
-                                    "currentSessionToken" to activeSessionToken,
-                                    "deviceModel" to currentModel,
-                                    "expiryTimestamp" to 0L,
-                                    "appTag" to "dasmo_scanner"
+                            if (rawAdmin) {
+                                addDbLog("Admin authenticated: $normalizedEmail. State -> APPROVED")
+                                _authState.value = AuthState.APPROVED
+                                _isAdmin.value = true
+                                listenToAllUsers()
+                                startFirestoreSync()
+
+                                // Update admin device info
+                                docRef.update(
+                                    mapOf(
+                                        "deviceId" to safeDeviceId,
+                                        "dasmo_deviceId" to safeDeviceId,
+                                        "deviceModel" to currentModel,
+                                        "currentSessionToken" to activeSessionToken,
+                                        "lastActiveTimestamp" to System.currentTimeMillis(),
+                                        "isApproved" to true,
+                                        "dasmo_isApproved" to true,
+                                        "isAdmin" to true,
+                                        "dasmo_isAdmin" to true,
+                                        "status" to "approved",
+                                        "dasmo_status" to "approved",
+                                        "role" to "admin",
+                                        "dasmo_role" to "admin"
+                                    )
                                 )
-                                if (isAdminEmail) {
-                                    updates["isAdmin"] = true
-                                    updates["dasmo_isAdmin"] = true
-                                    updates["isApproved"] = true
-                                    updates["dasmo_isApproved"] = true
-                                    updates["role"] = "admin"
-                                    updates["dasmo_role"] = "admin"
-                                    updates["status"] = "approved"
-                                    updates["dasmo_status"] = "approved"
+                            } else {
+                                _isAdmin.value = false
+
+                                // 1. Device Binding Verification (Anti-sharing)
+                                if (rawDeviceId.isNotEmpty() && rawDeviceId != safeDeviceId) {
+                                    addDbLog("DEVICE MISMATCH: Account bound to '$rawDeviceModel' ($rawDeviceId). Current device is '$currentModel' ($safeDeviceId)")
+                                    _authState.value = AuthState.DEVICE_MISMATCH
+                                    return@addSnapshotListener
                                 }
-                                docRef.update(updates).addOnFailureListener { err ->
-                                    addDbLog("Notice updating device session: ${err.message}")
+
+                                // 2. Admin Approval Verification
+                                if (!isApproved || rawStatus != "approved") {
+                                    addDbLog("AWAITING APPROVAL: User $normalizedEmail status is '$rawStatus' (isApproved=$isApproved). Access blocked.")
+                                    if (rawDeviceId.isEmpty()) {
+                                        docRef.update(
+                                            mapOf(
+                                                "deviceId" to safeDeviceId,
+                                                "dasmo_deviceId" to safeDeviceId,
+                                                "deviceModel" to currentModel,
+                                                "lastActiveTimestamp" to System.currentTimeMillis()
+                                            )
+                                        )
+                                    }
+                                    _authState.value = AuthState.PENDING_APPROVAL
+                                    return@addSnapshotListener
                                 }
+
+                                // 3. Expiration Check
+                                if (rawExpiry > 0L && System.currentTimeMillis() > rawExpiry) {
+                                    addDbLog("PLAN EXPIRED: Subscription ended for $normalizedEmail.")
+                                    _authState.value = AuthState.DEVICE_MISMATCH
+                                    return@addSnapshotListener
+                                }
+
+                                // 4. Approved & Device Matched: Full Access!
+                                addDbLog("ACCESS GRANTED: User $normalizedEmail approved on bound device ($safeDeviceId).")
+                                _authState.value = AuthState.APPROVED
+                                startFirestoreSync()
+
+                                docRef.update(
+                                    mapOf(
+                                        "deviceId" to safeDeviceId,
+                                        "dasmo_deviceId" to safeDeviceId,
+                                        "deviceModel" to currentModel,
+                                        "currentSessionToken" to activeSessionToken,
+                                        "lastActiveTimestamp" to System.currentTimeMillis(),
+                                        "appTag" to "dasmo_scanner"
+                                    )
+                                )
                             }
                         } else {
-                            addDbLog("Document users/$normalizedEmail does not exist. Registering user record.")
-                            val user = mapOf(
+                            // User not registered in Firestore -> Create record
+                            addDbLog("Registering new user record in Firestore: users/$normalizedEmail")
+                            val userDoc = mapOf(
                                 "email" to normalizedEmail,
                                 "deviceId" to safeDeviceId,
                                 "dasmo_deviceId" to safeDeviceId,
                                 "deviceModel" to currentModel,
                                 "currentSessionToken" to activeSessionToken,
                                 "expiryTimestamp" to 0L,
+                                "registrationTimestamp" to System.currentTimeMillis(),
+                                "lastActiveTimestamp" to System.currentTimeMillis(),
                                 "isApproved" to isAdminEmail,
                                 "dasmo_isApproved" to isAdminEmail,
                                 "isAdmin" to isAdminEmail,
@@ -242,10 +296,18 @@ class HomeViewModel(
                                 "dasmo_status" to if (isAdminEmail) "approved" else "pending",
                                 "appTag" to "dasmo_scanner"
                             )
-                            docRef.set(user, com.google.firebase.firestore.SetOptions.merge()).addOnSuccessListener {
-                                addDbLog("Successfully registered user record users/$normalizedEmail.")
-                            }.addOnFailureListener { err ->
-                                addDbLog("Notice creating user record in Firestore: ${err.message}")
+                            docRef.set(userDoc, com.google.firebase.firestore.SetOptions.merge()).addOnSuccessListener {
+                                addDbLog("Registered record for $normalizedEmail.")
+                            }
+
+                            if (isAdminEmail) {
+                                _authState.value = AuthState.APPROVED
+                                _isAdmin.value = true
+                                listenToAllUsers()
+                                startFirestoreSync()
+                            } else {
+                                _authState.value = AuthState.PENDING_APPROVAL
+                                _isAdmin.value = false
                             }
                         }
                     }
@@ -257,7 +319,7 @@ class HomeViewModel(
     private fun listenToAllUsers() {
         usersListenerRegistration?.remove()
         addDbLog("listenToAllUsers: Subscribing to snapshots for 'users' collection in Firestore.")
-        usersListenerRegistration = firestore.collection("users").addSnapshotListener { snapshot, e ->
+        usersListenerRegistration = firestore.collection("dasmo_scanner_users").addSnapshotListener { snapshot, e ->
             if (e != null) {
                 addDbLog("listenToAllUsers ERROR: ${e.message}")
                 _statusMessage.value = "Error loading users: ${e.message}"
@@ -272,30 +334,39 @@ class HomeViewModel(
 
                 val users = snapshot.documents.mapNotNull { doc ->
                     val email = doc.getString("email")?.takeIf { it.isNotBlank() } ?: doc.id
+                    val isSuperAdmin = email.trim().lowercase() == "subhojitpaul26042004@gmail.com"
                     val isApprovedVal = doc.getBoolean("dasmo_isApproved") ?: doc.getBoolean("isApproved") ?: false
-                    val statusVal = doc.getString("dasmo_status") ?: doc.getString("status") ?: ""
-                    val roleVal = doc.getString("dasmo_role") ?: doc.getString("role") ?: ""
+                    val statusVal = doc.getString("dasmo_status") ?: doc.getString("status") ?: "pending"
+                    val roleVal = doc.getString("dasmo_role") ?: doc.getString("role") ?: if (isSuperAdmin) "admin" else "user"
                     val deviceIdVal = doc.getString("dasmo_deviceId") ?: doc.getString("deviceId") ?: ""
-                    val isAdminVal = email.trim().lowercase() == "subhojitpaul26042004@gmail.com" || roleVal == "admin" || doc.getBoolean("isAdmin") ?: false || doc.getBoolean("dasmo_isAdmin") ?: false
+                    val deviceModelVal = doc.getString("deviceModel") ?: ""
+                    val sessionVal = doc.getString("currentSessionToken") ?: ""
+                    val expiryVal = doc.getLong("expiryTimestamp") ?: 0L
+                    val regVal = doc.getLong("registrationTimestamp") ?: 0L
+                    val lastActiveVal = doc.getLong("lastActiveTimestamp") ?: 0L
+                    val isAdminVal = isSuperAdmin || roleVal == "admin" || (doc.getBoolean("isAdmin") ?: false) || (doc.getBoolean("dasmo_isAdmin") ?: false)
 
                     AppUser(
                         email = email,
                         deviceId = deviceIdVal,
-                        isApproved = isApprovedVal || statusVal == "approved",
+                        deviceModel = deviceModelVal,
+                        isApproved = isApprovedVal || statusVal == "approved" || isAdminVal,
                         isAdmin = isAdminVal,
-                        role = roleVal.ifEmpty { if (isAdminVal) "admin" else "user" },
-                        status = statusVal.ifEmpty { "pending" }
+                        role = if (isAdminVal) "admin" else roleVal,
+                        status = if (isAdminVal) "approved" else statusVal,
+                        currentSessionToken = sessionVal,
+                        expiryTimestamp = expiryVal,
+                        registrationTimestamp = regVal,
+                        lastActiveTimestamp = lastActiveVal
                     )
                 }
 
-                addDbLog("listenToAllUsers: Processed ${users.size} user models. Pending: ${users.count { it.status == "pending" || (!it.isApproved && !it.isAdmin) }}, Approved: ${users.count { it.isApproved && !it.isAdmin }}, Admins: ${users.count { it.isAdmin }}")
-
                 if (_allUsers.value.isNotEmpty()) {
-                    val currentPending = users.filter { it.status == "pending" || (!it.isApproved && !it.isAdmin) }
+                    val currentPending = users.filter { it.status == "pending" && !it.isAdmin }
                     for (u in currentPending) {
                         val normEmail = u.email.trim().lowercase()
-                        if (!oldPendingEmails.contains(normEmail)) {
-                            addDbLog("listenToAllUsers: NEW PENDING REQUEST DETECTED: ${u.email}")
+                        if (!oldPendingEmails.contains(normEmail) && normEmail != "subhojitpaul26042004@gmail.com") {
+                            addDbLog("listenToAllUsers: NEW PENDING ACCESS REQUEST: ${u.email}")
                             _newRequestNotification.value = u.email
                             sendSystemNotification(u.email)
                         }
@@ -314,8 +385,8 @@ class HomeViewModel(
             return
         }
         val newApproved = !currentStatus
-        val newStatus = if (newApproved) "approved" else "pending"
-        firestore.collection("users").document(email.trim().lowercase()).update(
+        val newStatus = if (newApproved) "approved" else "rejected"
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
             "isApproved", newApproved,
             "dasmo_isApproved", newApproved,
             "status", newStatus,
@@ -329,7 +400,7 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("users").document(email.trim().lowercase()).update(
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
             "isApproved", true,
             "dasmo_isApproved", true,
             "status", "approved",
@@ -341,22 +412,99 @@ class HomeViewModel(
         }
     }
 
+    fun declineUser(email: String) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
+            "isApproved", false,
+            "dasmo_isApproved", false,
+            "status", "rejected",
+            "dasmo_status", "rejected"
+        ).addOnSuccessListener {
+            _statusMessage.value = "User $email access revoked."
+        }
+    }
+
+    /**
+     * Unbinds the user's hardware device so they can register a new phone upon approval.
+     */
     fun revokeUserDevice(email: String) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("users").document(email.trim().lowercase()).update(
-            "deviceId", "",
-            "dasmo_deviceId", "",
-            "isApproved", false,
-            "dasmo_isApproved", false,
-            "status", "pending",
-            "dasmo_status", "pending"
-        ).addOnFailureListener {
-            it.printStackTrace()
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
+            mapOf(
+                "deviceId" to "",
+                "dasmo_deviceId" to "",
+                "deviceModel" to "",
+                "isApproved" to false,
+                "dasmo_isApproved" to false,
+                "status" to "pending",
+                "dasmo_status" to "pending",
+                "currentSessionToken" to ""
+            )
+        ).addOnSuccessListener {
+            _statusMessage.value = "Device lock reset for $email. User can now bind a new device."
         }
+    }
+
+    fun updateUserExpiry(email: String, expiryTimestamp: Long) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update("expiryTimestamp", expiryTimestamp)
+            .addOnSuccessListener {
+                _statusMessage.value = "Updated access plan duration for $email."
+            }
+    }
+
+    fun deleteUser(email: String) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).delete()
+            .addOnSuccessListener {
+                _statusMessage.value = "Deleted user $email from database."
+            }
+    }
+
+    fun createUserManually(email: String, role: String, status: String, expiryTimestamp: Long = 0L) {
+        val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
+        if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
+            _statusMessage.value = "Unauthorized action!"
+            return
+        }
+        val trimmed = email.trim().lowercase()
+        val isApproved = status == "approved"
+        val isAdmin = role == "admin"
+        val doc = mapOf(
+            "email" to trimmed,
+            "role" to role,
+            "dasmo_role" to role,
+            "status" to status,
+            "dasmo_status" to status,
+            "isApproved" to isApproved,
+            "dasmo_isApproved" to isApproved,
+            "isAdmin" to isAdmin,
+            "dasmo_isAdmin" to isAdmin,
+            "expiryTimestamp" to expiryTimestamp,
+            "registrationTimestamp" to System.currentTimeMillis(),
+            "lastActiveTimestamp" to System.currentTimeMillis(),
+            "appTag" to "admin_preapproved"
+        )
+        firestore.collection("dasmo_scanner_users").document(trimmed).set(doc, com.google.firebase.firestore.SetOptions.merge())
+            .addOnSuccessListener {
+                _statusMessage.value = "Created and pre-approved account for $trimmed."
+            }
     }
 
     private fun sendSystemNotification(email: String) {
@@ -655,7 +803,7 @@ class HomeViewModel(
                 addDbLog("No user record in local memory list.")
             }
 
-            firestore.collection("users").get()
+            firestore.collection("dasmo_scanner_users").get()
                 .addOnSuccessListener { snapshot ->
                     addDbLog("Firestore Connection: SUCCESS! Loaded ${snapshot.size()} documents from 'users' collection.")
                     val matching = snapshot.documents.find { it.id.trim().lowercase() == currentLoggedInEmail }

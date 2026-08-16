@@ -238,6 +238,21 @@ fun MainScreen(viewModel: HomeViewModel) {
         }
     }
 
+    var updateInfo by remember { mutableStateOf<com.example.util.UpdateChecker.UpdateInfo?>(null) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        try {
+            val info = com.example.util.UpdateChecker.checkForUpdates(context)
+            if (info.hasUpdate) {
+                updateInfo = info
+                showUpdateDialog = true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     LaunchedEffect(activeTab, googleEmail) {
         if (activeTab == "FILES" && googleEmail != null) {
             viewModel.fetchDriveFiles(context)
@@ -433,6 +448,13 @@ fun MainScreen(viewModel: HomeViewModel) {
             onRunDiagnostics = { viewModel.runDiagnostics() }
         )
         return
+    }
+
+    if (showUpdateDialog && updateInfo != null) {
+        com.example.ui.InAppUpdateDialog(
+            updateInfo = updateInfo!!,
+            onDismiss = { showUpdateDialog = false }
+        )
     }
 
     if (isAdmin && newRequestNotification != null) {
@@ -1231,9 +1253,67 @@ fun MainScreen(viewModel: HomeViewModel) {
                                 }
                             }
                         }
-                    }
+                            // App Update Card
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        Toast.makeText(context, "Checking GitHub Releases for updates...", Toast.LENGTH_SHORT).show()
+                                        scope.launch {
+                                            try {
+                                                val info = com.example.util.UpdateChecker.checkForUpdates(context)
+                                                updateInfo = info
+                                                if (info.hasUpdate) {
+                                                    showUpdateDialog = true
+                                                } else {
+                                                    Toast.makeText(context, "You are using the latest version (v${info.currentVersion})", Toast.LENGTH_LONG).show()
+                                                }
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Failed to check updates: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "APP VERSION & UPDATES",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            "CHECK FOR UPDATES",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            "Fetch latest APK and release changelogs from GitHub",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.SystemUpdate,
+                                        contentDescription = "Update",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
+                            }
 
-                    // Visual Storage Usage Indicator Card
+                            // Visual Storage Usage Indicator Card
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                         shape = RoundedCornerShape(16.dp),
@@ -1646,8 +1726,12 @@ fun MainScreen(viewModel: HomeViewModel) {
                     AdminDashboardScreen(
                         allUsers = allUsers,
                         onApprove = { email -> viewModel.approveUser(email) },
-                        onDecline = { email -> viewModel.revokeUserDevice(email) },
+                        onDecline = { email -> viewModel.declineUser(email) },
                         onToggleApproval = { email, isApproved -> viewModel.toggleUserApproval(email, isApproved) },
+                        onResetDevice = { email -> viewModel.revokeUserDevice(email) },
+                        onDeleteUser = { email -> viewModel.deleteUser(email) },
+                        onUpdateExpiry = { email, timestamp -> viewModel.updateUserExpiry(email, timestamp) },
+                        onCreateUser = { email, role, status, expiry -> viewModel.createUserManually(email, role, status, expiry) },
                         statusMessage = statusMessage,
                         onClearStatus = { viewModel.clearStatusMessage() },
                         onRunDiagnostics = { viewModel.runDiagnostics() },
