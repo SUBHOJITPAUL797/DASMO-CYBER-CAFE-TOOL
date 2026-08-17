@@ -93,7 +93,8 @@ data class AppUser(
     val currentSessionToken: String = "",
     val expiryTimestamp: Long = 0L,
     val registrationTimestamp: Long = 0L,
-    val lastActiveTimestamp: Long = 0L
+    val lastActiveTimestamp: Long = 0L,
+    val totalScannedCount: Long = 0L
 )
 
 class HomeViewModel(
@@ -118,7 +119,6 @@ class HomeViewModel(
         }
         authListenerRegistration?.remove()
         usersListenerRegistration?.remove()
-        scannedDocsListenerRegistration?.remove()
     }
 
 
@@ -253,9 +253,6 @@ class HomeViewModel(
                     if (usersListenerRegistration == null) {
                         listenToAllUsers()
                     }
-                    if (scannedDocsListenerRegistration == null) {
-                        startFirestoreSync()
-                    }
                 } else {
                     _isAdmin.value = false
 
@@ -276,9 +273,6 @@ class HomeViewModel(
                     // 4. Approved & Device Matched: Full Access!
                     addDbLog("ACCESS GRANTED: User $normalizedEmail approved on bound device ($safeDeviceId).")
                     _authState.value = AuthState.APPROVED
-                    if (scannedDocsListenerRegistration == null) {
-                        startFirestoreSync()
-                    }
                 }
             } else {
                 // User not registered in Firestore -> Create record ONCE
@@ -292,6 +286,7 @@ class HomeViewModel(
                     "expiryTimestamp" to 0L,
                     "registrationTimestamp" to System.currentTimeMillis(),
                     "lastActiveTimestamp" to System.currentTimeMillis(),
+                    "totalScannedCount" to 0L,
                     "isApproved" to isAdminEmail,
                     "dasmo_isApproved" to isAdminEmail,
                     "isAdmin" to isAdminEmail,
@@ -311,9 +306,6 @@ class HomeViewModel(
                     _isAdmin.value = true
                     if (usersListenerRegistration == null) {
                         listenToAllUsers()
-                    }
-                    if (scannedDocsListenerRegistration == null) {
-                        startFirestoreSync()
                     }
                 } else {
                     _authState.value = AuthState.PENDING_APPROVAL
@@ -352,6 +344,7 @@ class HomeViewModel(
                     val expiryVal = doc.getLong("expiryTimestamp") ?: 0L
                     val regVal = doc.getLong("registrationTimestamp") ?: 0L
                     val lastActiveVal = doc.getLong("lastActiveTimestamp") ?: 0L
+                    val totalScansVal = doc.getLong("totalScannedCount") ?: doc.getLong("scannedCount") ?: doc.getLong("scanCount") ?: 0L
                     val isAdminVal = isSuperAdmin || roleVal == "admin" || (doc.getBoolean("isAdmin") ?: false) || (doc.getBoolean("dasmo_isAdmin") ?: false)
 
                     AppUser(
@@ -365,7 +358,8 @@ class HomeViewModel(
                         currentSessionToken = sessionVal,
                         expiryTimestamp = expiryVal,
                         registrationTimestamp = regVal,
-                        lastActiveTimestamp = lastActiveVal
+                        lastActiveTimestamp = lastActiveVal,
+                        totalScannedCount = totalScansVal
                     )
                 }
 
@@ -507,12 +501,24 @@ class HomeViewModel(
             "expiryTimestamp" to expiryTimestamp,
             "registrationTimestamp" to System.currentTimeMillis(),
             "lastActiveTimestamp" to System.currentTimeMillis(),
+            "totalScannedCount" to 0L,
             "appTag" to "admin_preapproved"
         )
         firestore.collection("dasmo_scanner_users").document(trimmed).set(doc, com.google.firebase.firestore.SetOptions.merge())
             .addOnSuccessListener {
                 _statusMessage.value = "Created and pre-approved account for $trimmed."
             }
+    }
+
+    fun incrementUserScannedCount() {
+        val email = googleEmail.value?.trim()?.lowercase() ?: return
+        if (email.isEmpty()) return
+        firestore.collection("dasmo_scanner_users").document(email).update(
+            "totalScannedCount", com.google.firebase.firestore.FieldValue.increment(1),
+            "lastActiveTimestamp", System.currentTimeMillis()
+        ).addOnFailureListener { err ->
+            addDbLog("Failed to increment user scan count: ${err.message}")
+        }
     }
 
     private fun sendSystemNotification(email: String) {
@@ -556,115 +562,6 @@ class HomeViewModel(
             notificationManager.notify(email.hashCode(), notification)
         } catch (e: Exception) {
             e.printStackTrace()
-        }
-    }
-
-    private var scannedDocsListenerRegistration: ListenerRegistration? = null
-
-    fun startFirestoreSync() {
-        scannedDocsListenerRegistration?.remove()
-        addDbLog("startFirestoreSync: Subscribing to snapshots for 'dasmo_doc_scanner_documents' collection.")
-        scannedDocsListenerRegistration = firestore.collection("dasmo_doc_scanner_documents")
-            .addSnapshotListener { snapshot, e ->
-                if (e != null) {
-                    addDbLog("scannedDocsListener ERROR: ${e.message}")
-                    return@addSnapshotListener
-                }
-                if (snapshot != null) {
-                    addDbLog("scannedDocsListener: Received snapshot. Total cloud documents = ${snapshot.size()}")
-                    viewModelScope.launch(Dispatchers.IO) {
-                        for (doc in snapshot.documents) {
-                            val fileName = doc.getString("fileName") ?: continue
-                            val personName = doc.getString("personName") ?: ""
-                            val documentType = doc.getString("documentType") ?: ""
-                            val timestamp = doc.getLong("timestamp") ?: 0L
-                            val isUploaded = doc.getBoolean("isUploaded") ?: false
-                            val drivePath = doc.getString("drivePath")
-                            val firebaseUrl = doc.getString("firebaseUrl")
-
-                            // Check if this exists locally
-                            val localDocs = database.documentDao().getAllDocuments().first()
-                            val existingLocal = localDocs.find { it.fileName == fileName }
-
-                            if (existingLocal == null) {
-                                // Save it locally
-                                val localFile = File(context.filesDir, fileName)
-                                val newEntity = DocumentEntity(
-                                    fileName = fileName,
-                                    personName = personName,
-                                    documentType = documentType,
-                                    localFilePath = localFile.absolutePath,
-                                    timestamp = timestamp,
-                                    isUploaded = isUploaded,
-                                    drivePath = drivePath
-                                )
-                                database.documentDao().insertDocument(newEntity)
-
-                                // Download the file if firebaseUrl is available
-                                if (!firebaseUrl.isNullOrEmpty()) {
-                                    downloadAndSaveFile(firebaseUrl, localFile)
-                                }
-                            } else {
-                                // If the local file doesn't exist but we have a firebaseUrl, download it
-                                val localFile = File(existingLocal.localFilePath)
-                                if (!localFile.exists() && !firebaseUrl.isNullOrEmpty()) {
-                                    downloadAndSaveFile(firebaseUrl, localFile)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-    }
-
-    private suspend fun downloadAndSaveFile(url: String, targetFile: File) {
-        withContext(Dispatchers.IO) {
-            try {
-                val client = okhttp3.OkHttpClient()
-                val request = okhttp3.Request.Builder().url(url).build()
-                client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        response.body?.byteStream()?.use { input ->
-                            targetFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    private fun uploadDocToFirestoreAndStorage(localFile: File, entity: DocumentEntity) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                addDbLog("Firestore: Writing metadata directly to Firestore for ${entity.fileName} (Storage bypassed per setup)...")
-                val userEmail = googleEmail.value ?: "anonymous"
-                val firestoreDoc = mapOf(
-                    "fileName" to entity.fileName,
-                    "personName" to entity.personName,
-                    "documentType" to entity.documentType,
-                    "timestamp" to entity.timestamp,
-                    "isUploaded" to entity.isUploaded,
-                    "drivePath" to entity.drivePath,
-                    "firebaseUrl" to "",
-                    "creatorEmail" to userEmail
-                )
-                firestore.collection("dasmo_doc_scanner_documents")
-                    .document(entity.fileName)
-                    .set(firestoreDoc)
-                    .addOnSuccessListener {
-                        addDbLog("Firestore: Direct write SUCCESS for ${entity.fileName}")
-                    }
-                    .addOnFailureListener { err ->
-                        addDbLog("Firestore ERROR: Direct write FAILED for ${entity.fileName}: ${err.message}")
-                    }
-            } catch (e: Exception) {
-                addDbLog("ERROR in uploadDocToFirestoreAndStorage: ${e.message}")
-                e.printStackTrace()
-            }
         }
     }
 
@@ -1691,7 +1588,7 @@ class HomeViewModel(
                 )
                 val id = database.documentDao().insertDocument(newEntity)
                 if (id != -1L) {
-                    uploadDocToFirestoreAndStorage(localCopy, newEntity.copy(id = id.toInt()))
+                    incrementUserScannedCount()
                 }
                 id
             } catch (edb: Exception) {
@@ -1795,7 +1692,6 @@ class HomeViewModel(
                             drivePath = builtDrivePath
                         )
                         database.documentDao().updateDocument(updatedEntity)
-                        uploadDocToFirestoreAndStorage(localCopy, updatedEntity)
                     } catch (eup: Exception) {
                         eup.printStackTrace()
                     }
@@ -1926,7 +1822,7 @@ class HomeViewModel(
                         isUploaded = false,
                         drivePath = null
                     )
-                    uploadDocToFirestoreAndStorage(safeLocalCopy, newEntity)
+                    incrementUserScannedCount()
                     newId
                 }
             } catch (edb: Exception) {
@@ -2080,7 +1976,6 @@ class HomeViewModel(
                                     drivePath = builtDrivePath
                                 )
                                 database.documentDao().updateDocument(updatedEntity)
-                                uploadDocToFirestoreAndStorage(safeLocalCopy, updatedEntity)
                             } catch (eup: Exception) {
                                 eup.printStackTrace()
                             }
@@ -2245,7 +2140,7 @@ class HomeViewModel(
                 )
                 val id = database.documentDao().insertDocument(mergedEntity)
                 if (id != -1L) {
-                    uploadDocToFirestoreAndStorage(safeLocalCopy, mergedEntity.copy(id = id.toInt()))
+                    incrementUserScannedCount()
                 }
                 
                 updateQueueStatus(queueId, "Completed - Merged successfully!")

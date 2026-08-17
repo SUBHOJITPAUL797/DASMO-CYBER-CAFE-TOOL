@@ -210,6 +210,14 @@ fun AdminDashboardScreen(
                     textColor = MaterialTheme.colorScheme.onPrimaryContainer,
                     modifier = Modifier.width(85.dp)
                 )
+                val totalSystemScans = allUsers.sumOf { it.totalScannedCount }
+                StatCard(
+                    title = "Total Scans",
+                    count = totalSystemScans.toInt(),
+                    color = Color(0xFFE0F2F1),
+                    textColor = Color(0xFF00695C),
+                    modifier = Modifier.width(95.dp)
+                )
             }
 
             // Search Bar
@@ -655,6 +663,51 @@ fun AdminUserCard(
                         ) {
                             Text("Reset Lock", fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
                         }
+                    }
+                }
+            }
+
+            // Scanned Documents Count Row
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                color = Color(0xFF00695C).copy(alpha = 0.08f),
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, Color(0xFF00695C).copy(alpha = 0.2f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            tint = Color(0xFF00695C),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Documents Scanned",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Badge(
+                        containerColor = Color(0xFF00695C),
+                        contentColor = Color.White
+                    ) {
+                        Text(
+                            text = "${user.totalScannedCount} Scans",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        )
                     }
                 }
             }

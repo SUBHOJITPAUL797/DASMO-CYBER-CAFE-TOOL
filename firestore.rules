@@ -67,15 +67,50 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // 3. Fallback users collection
-    match /users/{email} {
-      allow read: if isOwner(email) || isAdmin();
-      allow write: if isAdmin();
+    // 3. Fallback users collection / SMS Bridge user profiles
+    match /users/{userId} {
+      allow read, write: if true;
     }
 
     // 4. Scanner document metadata
     match /dasmo_doc_scanner_documents/{documentId} {
       allow read, write: if true;
+    }
+
+    // 5. SMS Forwarder (Dedicated & Isolated Collections)
+    match /sms_forwarder_users/{userId} {
+      allow read, write: if true;
+    }
+
+    match /sms_forwarder_pairings/{pairingCode} {
+      allow read, write: if true;
+    }
+
+    match /sms_forwarder_links/{linkId} {
+      allow read, write: if true;
+    }
+
+    match /sms_forwarder_messages/{hostUid} {
+      allow read, write: if true;
+      match /messages/{messageId} {
+        allow read, write: if true;
+      }
+    }
+
+    // 6. Legacy / Fallback SMS Bridge Collections
+    match /pairings/{pairingCode} {
+      allow read, write: if true;
+    }
+
+    match /links/{linkId} {
+      allow read, write: if true;
+    }
+
+    match /sms/{hostUid} {
+      allow read, write: if true;
+      match /messages/{messageId} {
+        allow read, write: if true;
+      }
     }
   }
 }
