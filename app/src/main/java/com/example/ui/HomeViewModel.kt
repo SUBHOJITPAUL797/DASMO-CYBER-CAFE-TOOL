@@ -574,6 +574,9 @@ class HomeViewModel(
     val showConfirmation = settingsRepository.showConfirmation
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
 
+    val storageLimitMb = settingsRepository.storageLimitMb
+        .stateIn(viewModelScope, SharingStarted.Lazily, 100)
+
     val googleEmail = settingsRepository.googleEmail
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
@@ -870,6 +873,12 @@ class HomeViewModel(
         }
     }
 
+    fun updateStorageLimitMb(limitMb: Int) {
+        viewModelScope.launch {
+            settingsRepository.setStorageLimitMb(limitMb)
+        }
+    }
+
     fun cancelPendingDocument() {
         val pending = _pendingDocuments.value.firstOrNull() ?: return
         try { pending.compressedFile.delete() } catch (e: Exception) {}
@@ -878,6 +887,8 @@ class HomeViewModel(
         }
         _pendingDocuments.update { it.drop(1) }
         updateQueueStatus(pending.queueId, "Cancelled")
+        _statusMessage.value = ""
+        _isProcessing.value = false
     }
 
     fun setGoogleEmail(email: String?) {

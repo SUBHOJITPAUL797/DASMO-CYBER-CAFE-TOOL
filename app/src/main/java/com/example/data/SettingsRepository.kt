@@ -24,6 +24,12 @@ class SettingsRepository(private val context: Context) {
     private val AUTO_ENHANCE_ENABLED = androidx.datastore.preferences.core.booleanPreferencesKey("auto_enhance_enabled")
     private val USE_A4_FORMAT = androidx.datastore.preferences.core.booleanPreferencesKey("use_a4_format")
     private val IMAGE_FORMAT = stringPreferencesKey("image_format")
+    private val STORAGE_LIMIT_MB = intPreferencesKey("storage_limit_mb")
+
+    val storageLimitMb: Flow<Int> = context.dataStore.data
+        .map { preferences ->
+            preferences[STORAGE_LIMIT_MB] ?: 100 // Default to 100 MB
+        }
 
     val imageFormat: Flow<String> = context.dataStore.data
         .map { preferences ->
@@ -142,6 +148,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setImageFormat(format: String) {
         context.dataStore.edit { preferences ->
             preferences[IMAGE_FORMAT] = format
+        }
+    }
+
+    suspend fun setStorageLimitMb(limitMb: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[STORAGE_LIMIT_MB] = limitMb
         }
     }
 }

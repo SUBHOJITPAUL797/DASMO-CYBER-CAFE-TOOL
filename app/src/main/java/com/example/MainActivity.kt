@@ -196,6 +196,7 @@ fun MainScreen(
     val nameBeforeType by viewModel.nameBeforeType.collectAsStateWithLifecycle()
     val activeQueue by viewModel.activeQueue.collectAsStateWithLifecycle()
     val publicFolderSize by viewModel.publicFolderSize.collectAsStateWithLifecycle()
+    val storageLimitMb by viewModel.storageLimitMb.collectAsStateWithLifecycle()
     var selectedPreviewDoc by remember { mutableStateOf<com.example.data.DocumentEntity?>(null) }
     val scope = rememberCoroutineScope()
     val batchVerificationGroups by viewModel.batchVerificationGroups.collectAsStateWithLifecycle()
@@ -1311,9 +1312,10 @@ fun MainScreen(
                             }
                             Spacer(modifier = Modifier.height(12.dp))
                             
-                            val limitBytes = 100 * 1024 * 1024L // 100 MB threshold
+                            val limitBytes = storageLimitMb.toLong() * 1024 * 1024L
                             val progress = (publicFolderSize.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f)
                             val isNearLimit = publicFolderSize > limitBytes * 0.8 // warning at 80%
+                            val limitLabel = if (storageLimitMb >= 1000) "${storageLimitMb / 1000} GB" else "$storageLimitMb MB"
                             
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1343,7 +1345,7 @@ fun MainScreen(
                                     )
                                 }
                                 Text(
-                                    text = "Limit: 100 MB",
+                                    text = "Limit: $limitLabel",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -2450,9 +2452,10 @@ fun MainScreen(
                                     }
                                 }
 
-                                val limitBytes = 100 * 1024 * 1024L
+                                val limitBytes = storageLimitMb.toLong() * 1024 * 1024L
                                 val progress = (publicFolderSize.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f)
                                 val isNearLimit = publicFolderSize > limitBytes * 0.8
+                                val limitLabel = if (storageLimitMb >= 1000) "${storageLimitMb / 1000} GB" else "$storageLimitMb MB"
                                 val sizeText = if (publicFolderSize == 0L) "0.00 KB" else {
                                     val kb = publicFolderSize / 1024.0
                                     val mb = kb / 1024.0
@@ -2476,7 +2479,7 @@ fun MainScreen(
                                         color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
                                     )
                                     Text(
-                                        text = "Limit: 100 MB",
+                                        text = "Limit: $limitLabel",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -2491,6 +2494,63 @@ fun MainScreen(
                                     color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                                 )
+
+                                // Custom Storage Alert Threshold Slider
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                        .padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(
+                                                text = "Storage Alert Limit",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "Clean-up warnings trigger when storage reaches 80%",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer
+                                        ) {
+                                            Text(
+                                                text = limitLabel,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                    }
+                                    Slider(
+                                        value = storageLimitMb.toFloat(),
+                                        onValueChange = { viewModel.updateStorageLimitMb(it.toInt()) },
+                                        valueRange = 50f..1000f,
+                                        steps = 18,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text("50 MB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("250 MB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("500 MB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("1 GB", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
 
                                 OutlinedButton(
                                     onClick = { showClearJunkWarning = true },
