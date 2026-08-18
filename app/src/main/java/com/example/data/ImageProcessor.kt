@@ -664,6 +664,20 @@ object ImageProcessor {
     fun getPublicFolderSize(context: Context): Long {
         var totalSize = 0L
         try {
+            // 1. App internal cache directory (temporary crop files, bitmap buffers)
+            context.cacheDir?.let { cache ->
+                if (cache.exists()) totalSize += getFolderSizeRecursively(cache)
+            }
+            // 2. App external cache directory (camera provider outputs)
+            context.externalCacheDir?.let { extCache ->
+                if (extCache.exists()) totalSize += getFolderSizeRecursively(extCache)
+            }
+            // 3. App internal files directory (locally saved document PDFs / JPEGs)
+            context.filesDir?.let { files ->
+                if (files.exists()) totalSize += getFolderSizeRecursively(files)
+            }
+
+            // 4. Public device documents folder (Documents/Dasmo Scan)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
                 val collection = MediaStore.Files.getContentUri("external")
@@ -682,7 +696,7 @@ object ImageProcessor {
                 @Suppress("DEPRECATION")
                 val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Dasmo Scan")
                 if (dir.exists()) {
-                    totalSize = getFolderSizeRecursively(dir)
+                    totalSize += getFolderSizeRecursively(dir)
                 }
             }
         } catch (e: Exception) {
