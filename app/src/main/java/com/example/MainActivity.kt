@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -3160,13 +3161,19 @@ fun MainScreen(
                 )
             },
             text = {
+                val configuration = LocalConfiguration.current
+                val maxDialogHeight = (configuration.screenHeightDp * 0.62f).dp
                 Column(
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    modifier = Modifier.fillMaxWidth()
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = maxDialogHeight)
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp)
                 ) {
                     Text(
                         text = "Dasmo AI analyzed the document content. Adjust the details to fit your governmental portal requirements.",
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
@@ -3175,7 +3182,7 @@ fun MainScreen(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (isPreviewExpanded) 300.dp else 140.dp)
+                            .height(if (isPreviewExpanded) 260.dp else 110.dp)
                             .clickable { isPreviewExpanded = !isPreviewExpanded },
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -3186,7 +3193,7 @@ fun MainScreen(
                                 contentDescription = "Analysis Preview",
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(8.dp)
+                                    .padding(6.dp)
                                     .clip(RoundedCornerShape(8.dp)),
                                 contentScale = if (isPreviewExpanded) ContentScale.Fit else ContentScale.Crop
                             )
@@ -3194,14 +3201,14 @@ fun MainScreen(
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .padding(16.dp)
-                                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .padding(10.dp)
+                                        .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
                                 ) {
                                     Text(
-                                        "Tap to review crop",
+                                        "Tap to expand crop",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.surface
+                                        color = Color.White
                                     )
                                 }
                             }
@@ -3258,7 +3265,7 @@ fun MainScreen(
 
                     if (tempPersonName.trim().isEmpty()) {
                         Text(
-                            text = "⚠ Leaving this blank will auto-generate: Client_xxxxx",
+                            text = "⚠ Blank will auto-generate: Client_xxxxx",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Medium,
                             color = Color(0xFFE65100),
@@ -3285,8 +3292,6 @@ fun MainScreen(
                             cursorColor = MaterialTheme.colorScheme.primary
                         )
                     )
-
-                    Spacer(modifier = Modifier.height(16.dp))
 
                     Text(
                         text = "Upload Format",
@@ -3362,11 +3367,12 @@ fun MainScreen(
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             Text(
-                                "PORTAL FILENAME",
+                                "PORTAL FILENAME PREVIEW",
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
 							)
+                            Spacer(modifier = Modifier.height(2.dp))
                             val displayPersonName = tempPersonName.trim().ifEmpty { "Client_xxxxx" }
                             val displayDocumentType = tempDocumentType.trim().ifEmpty { "Document" }
                             val displayBaseName = if (nameBeforeType) {
@@ -3374,8 +3380,13 @@ fun MainScreen(
                             } else {
                                 "${displayDocumentType.replace(" ", "_")}_${displayPersonName.replace(" ", "_")}"
                             }
+                            val fileExt = when (tempUploadFormat) {
+                                UploadFormat.PDF -> ".pdf"
+                                UploadFormat.JPEG -> if (imageFormat.equals("WEBP", ignoreCase = true)) ".webp" else ".jpeg"
+                                UploadFormat.BOTH -> if (imageFormat.equals("WEBP", ignoreCase = true)) ".webp + .pdf" else ".jpeg + .pdf"
+                            }
                             Text(
-                                "$displayBaseName.jpeg",
+                                "$displayBaseName$fileExt",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.primary
@@ -3393,17 +3404,19 @@ fun MainScreen(
                         onClick = {
                             viewModel.uploadInBackground(context, tempPersonName, tempDocumentType, tempUploadFormat)
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Text("Upload in Background", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        Text("Upload in Background", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                     }
                     Button(
                         onClick = {
                             viewModel.confirmAndUpload(context, tempPersonName, tempDocumentType, tempUploadFormat)
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                     ) {
-                        Text("Sync Directly", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                        Text("Sync Directly", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                     }
                 }
             },
