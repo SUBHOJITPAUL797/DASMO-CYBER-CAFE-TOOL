@@ -1384,7 +1384,9 @@ class HomeViewModel(
         viewModelScope.launch {
             _isProcessing.value = true
             val queueId = java.util.UUID.randomUUID().toString()
-            val format = UploadFormat.PDF
+            val format = if (imageFormat.value.equals("JPEG", true)) UploadFormat.JPEG 
+                         else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
+                         else UploadFormat.PDF
             
             // Immediately add to queue monitor representing live status from start to finish
             val initialItem = QueueItem(

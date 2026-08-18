@@ -3139,7 +3139,13 @@ fun MainScreen(
         val doc = pendingDoc!!
         var tempPersonName by remember(doc) { mutableStateOf(doc.initialPersonName) }
         var tempDocumentType by remember(doc) { mutableStateOf(doc.initialDocumentType) }
-        var tempUploadFormat by remember(doc) { mutableStateOf(UploadFormat.JPEG) }
+        var tempUploadFormat by remember(doc) { 
+            mutableStateOf(
+                if (imageFormat.equals("PDF", ignoreCase = true)) UploadFormat.PDF 
+                else if (imageFormat.equals("BOTH", ignoreCase = true)) UploadFormat.BOTH 
+                else UploadFormat.JPEG
+            ) 
+        }
 
         val presets = remember { listOf("Aadhaar Card", "PAN Card", "Voter ID", "Passport", "Driving License", "Marksheet", "Ration Card") }
 
