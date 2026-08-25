@@ -577,6 +577,9 @@ class HomeViewModel(
     val storageLimitMb = settingsRepository.storageLimitMb
         .stateIn(viewModelScope, SharingStarted.Lazily, 100)
 
+    val batchPagesPerDoc = settingsRepository.batchPagesPerDoc
+        .stateIn(viewModelScope, SharingStarted.Lazily, 2)
+
     val googleEmail = settingsRepository.googleEmail
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
@@ -879,6 +882,23 @@ class HomeViewModel(
         }
     }
 
+    fun updateBatchPagesPerDoc(pages: Int) {
+        viewModelScope.launch {
+            settingsRepository.setBatchPagesPerDoc(pages)
+        }
+    }
+
+    private var lastBatchScannedUris: List<Uri> = emptyList()
+
+    fun regroupBatch(pagesPerDoc: Int) {
+        if (lastBatchScannedUris.isEmpty()) return
+        val chunkSize = pagesPerDoc.coerceAtLeast(1)
+        val groupedUris = lastBatchScannedUris.chunked(chunkSize).map { chunk ->
+            BatchGroup(uris = chunk, isIdCard = false)
+        }
+        _batchVerificationGroups.value = groupedUris
+    }
+
     fun cancelPendingDocument() {
         val pending = _pendingDocuments.value.firstOrNull() ?: return
         try { pending.compressedFile.delete() } catch (e: Exception) {}
@@ -1115,24 +1135,18 @@ class HomeViewModel(
         }
     }
 
-    fun processBatchScannedImages(imageUris: List<Uri>) {
+    fun processBatchScannedImages(imageUris: List<Uri>, customPagesPerDoc: Int? = null) {
         if (imageUris.isEmpty()) return
+        lastBatchScannedUris = imageUris
         
         viewModelScope.launch {
             _isProcessing.value = true
             _statusMessage.value = "Processing batch..."
 
             try {
-                val groupedUris = mutableListOf<BatchGroup>()
-                var i = 0
-                while (i < imageUris.size) {
-                    if (i + 1 < imageUris.size) {
-                        groupedUris.add(BatchGroup(uris = listOf(imageUris[i], imageUris[i+1]), isIdCard = false))
-                        i += 2
-                    } else {
-                        groupedUris.add(BatchGroup(uris = listOf(imageUris[i]), isIdCard = false))
-                        i += 1
-                    }
+                val chunkSize = (customPagesPerDoc ?: batchPagesPerDoc.value).coerceAtLeast(1)
+                val groupedUris = imageUris.chunked(chunkSize).map { chunk ->
+                    BatchGroup(uris = chunk, isIdCard = false)
                 }
 
                 _isProcessing.value = false

@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -197,6 +198,7 @@ fun MainScreen(
     val activeQueue by viewModel.activeQueue.collectAsStateWithLifecycle()
     val publicFolderSize by viewModel.publicFolderSize.collectAsStateWithLifecycle()
     val storageLimitMb by viewModel.storageLimitMb.collectAsStateWithLifecycle()
+    val batchPagesPerDoc by viewModel.batchPagesPerDoc.collectAsStateWithLifecycle()
     var selectedPreviewDoc by remember { mutableStateOf<com.example.data.DocumentEntity?>(null) }
     val scope = rememberCoroutineScope()
     val batchVerificationGroups by viewModel.batchVerificationGroups.collectAsStateWithLifecycle()
@@ -348,7 +350,7 @@ fun MainScreen(
             val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
             scanResult?.pages?.let { pages ->
                 val imageUris = pages.map { it.imageUri }
-                viewModel.processBatchScannedImages(imageUris)
+                viewModel.processBatchScannedImages(imageUris, batchPagesPerDoc)
             }
         }
     }
@@ -2697,6 +2699,52 @@ fun MainScreen(
                                         }
                                     }
                                 }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                                // Batch Scan Grouping
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text("Batch Pages Per Document", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                            Text("Number of pages merged into each PDF/file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = MaterialTheme.colorScheme.primaryContainer
+                                        ) {
+                                            Text(
+                                                text = if (batchPagesPerDoc == 1) "1 Page (Single)" else if (batchPagesPerDoc == 2) "2 Pages (Pair)" else "$batchPagesPerDoc Pages",
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                    }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        listOf(1 to "1 (Single)", 2 to "2 (Pair)", 3 to "3 Pages", 4 to "4 Pages").forEach { (count, label) ->
+                                            val isSelected = batchPagesPerDoc == count
+                                            Button(
+                                                onClick = { viewModel.updateBatchPagesPerDoc(count) },
+                                                modifier = Modifier.weight(1f).height(40.dp),
+                                                shape = RoundedCornerShape(10.dp),
+                                                colors = if (isSelected) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                                         else ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                                                contentPadding = PaddingValues(horizontal = 4.dp)
+                                            ) {
+                                                Text(label, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, fontSize = 11.sp)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -3182,9 +3230,10 @@ fun MainScreen(
     if (showContinuousBatchCamera) {
         com.example.ui.BatchCameraScanScreen(
             onDismiss = { showContinuousBatchCamera = false },
-            onFinishBatch = { uris ->
+            initialPagesPerDoc = batchPagesPerDoc,
+            onFinishBatch = { uris, pagesPerDoc ->
                 showContinuousBatchCamera = false
-                viewModel.processBatchScannedImages(uris)
+                viewModel.processBatchScannedImages(uris, pagesPerDoc)
             }
         )
     }
@@ -4315,6 +4364,9 @@ fun BatchVerificationDialog(
     onDismiss: () -> Unit
 ) {
     var editableGroups by remember(groups) { mutableStateOf(groups) }
+    val allUris = remember(groups) { groups.flatMap { it.uris } }
+    var showCustomRegroupDialog by remember { mutableStateOf(false) }
+    var customRegroupInput by remember { mutableStateOf("2") }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -4330,8 +4382,11 @@ fun BatchVerificationDialog(
                         }
                     },
                     actions = {
-                        TextButton(onClick = { onConfirm(editableGroups) }) {
-                            Text("Process ${editableGroups.size} Docs")
+                        Button(
+                            onClick = { onConfirm(editableGroups) },
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Text("Process ${editableGroups.size} Docs", fontWeight = FontWeight.Bold)
                         }
                     }
                 )
@@ -4342,6 +4397,61 @@ fun BatchVerificationDialog(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
+                // Quick Regroup Banner
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Total Pages: ${allUris.size}",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Text(
+                                    text = "Quick Regroup Batch",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(1 to "1 (Single)", 2 to "2 (Pair)", 3 to "3 Pages", 4 to "4 Pages").forEach { (size, label) ->
+                                    OutlinedButton(
+                                        onClick = {
+                                            editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
+                                        },
+                                        modifier = Modifier.weight(1f).height(36.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 2.dp)
+                                    ) {
+                                        Text(label, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                                OutlinedButton(
+                                    onClick = { showCustomRegroupDialog = true },
+                                    modifier = Modifier.height(36.dp),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                ) {
+                                    Text("Custom", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 itemsIndexed(editableGroups) { index, group ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -4401,6 +4511,46 @@ fun BatchVerificationDialog(
                     }
                 }
             }
+        }
+
+        if (showCustomRegroupDialog) {
+            AlertDialog(
+                onDismissRequest = { showCustomRegroupDialog = false },
+                title = { Text("Custom Grouping") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Enter how many pages per document to group the ${allUris.size} scanned pages:")
+                        OutlinedTextField(
+                            value = customRegroupInput,
+                            onValueChange = { input ->
+                                if (input.all { it.isDigit() } && input.length <= 3) {
+                                    customRegroupInput = input
+                                }
+                            },
+                            label = { Text("Pages Per Document") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val size = customRegroupInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                        editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
+                        showCustomRegroupDialog = false
+                    }) {
+                        Text("Regroup")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCustomRegroupDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
     }
 }

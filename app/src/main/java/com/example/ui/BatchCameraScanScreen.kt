@@ -57,7 +57,8 @@ import java.util.UUID
 @Composable
 fun BatchCameraScanScreen(
     onDismiss: () -> Unit,
-    onFinishBatch: (List<Uri>) -> Unit
+    initialPagesPerDoc: Int = 2,
+    onFinishBatch: (List<Uri>, Int) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -115,6 +116,10 @@ fun BatchCameraScanScreen(
     var showFlashEffect by remember { mutableStateOf(false) }
     var showReviewSheet by remember { mutableStateOf(false) }
     var showGridOverlay by remember { mutableStateOf(true) }
+
+    var pagesPerDoc by remember { mutableIntStateOf(initialPagesPerDoc.coerceAtLeast(1)) }
+    var showCustomPagesDialog by remember { mutableStateOf(false) }
+    var customInputText by remember { mutableStateOf(pagesPerDoc.toString()) }
 
     val capturedPageUris = remember { mutableStateListOf<Uri>() }
     val capturedPageFiles = remember { mutableStateListOf<File>() }
@@ -397,15 +402,99 @@ fun BatchCameraScanScreen(
             }
         }
 
-        // Bottom Controls Bar (Shutter & Batch Queue Finish)
+        // Bottom Controls Bar (Grouping Selector, Shutter & Batch Queue Finish)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.75f))
-                .padding(vertical = 16.dp, horizontal = 20.dp),
+                .background(Color.Black.copy(alpha = 0.85f))
+                .padding(vertical = 12.dp, horizontal = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Grouping Mode Selector Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Calculation Badge
+                val docCount = if (capturedPageUris.isEmpty()) 0 else (capturedPageUris.size + pagesPerDoc - 1) / pagesPerDoc
+                val groupingSummary = when {
+                    capturedPageUris.isEmpty() -> if (pagesPerDoc == 1) "1 Page / Doc" else if (pagesPerDoc == 2) "Pair (2 Pages / Doc)" else "$pagesPerDoc Pages / Doc"
+                    pagesPerDoc == 1 -> "${capturedPageUris.size} Pages ➔ ${capturedPageUris.size} Single Docs"
+                    pagesPerDoc == 2 -> {
+                        val fullPairs = capturedPageUris.size / 2
+                        val remainder = capturedPageUris.size % 2
+                        if (remainder == 0) "${capturedPageUris.size} Pages ➔ $fullPairs Pair Docs"
+                        else "${capturedPageUris.size} Pages ➔ $docCount Docs (${fullPairs}x2 + 1)"
+                    }
+                    else -> {
+                        val fullGroups = capturedPageUris.size / pagesPerDoc
+                        val remainder = capturedPageUris.size % pagesPerDoc
+                        if (remainder == 0) "${capturedPageUris.size} Pages ➔ $fullGroups Docs"
+                        else "${capturedPageUris.size} Pages ➔ $docCount Docs (${fullGroups}x$pagesPerDoc + $remainder)"
+                    }
+                }
+                
+                Surface(
+                    color = Color.White.copy(alpha = 0.12f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text(
+                        text = "📄 $groupingSummary",
+                        color = Color(0xFF00E676),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+
+                // Quick selector buttons
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(1 to "1", 2 to "2", 3 to "3").forEach { (num, label) ->
+                        val isSelected = pagesPerDoc == num
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.12f))
+                                .clickable { pagesPerDoc = num }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSelected) Color.White else Color.White.copy(alpha = 0.8f),
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Normal
+                            )
+                        }
+                    }
+
+                    // Custom pill
+                    val isCustom = pagesPerDoc > 3
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (isCustom) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.12f))
+                            .clickable {
+                                customInputText = pagesPerDoc.toString()
+                                showCustomPagesDialog = true
+                            }
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isCustom) "$pagesPerDoc" else "N...",
+                            color = if (isCustom) Color.White else Color.White.copy(alpha = 0.8f),
+                            fontSize = 11.sp,
+                            fontWeight = if (isCustom) FontWeight.ExtraBold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
             // Live captured thumbnails strip
             if (capturedPageUris.isNotEmpty()) {
                 LazyRow(
@@ -521,7 +610,7 @@ fun BatchCameraScanScreen(
                 Button(
                     onClick = {
                         if (capturedPageUris.isNotEmpty()) {
-                            onFinishBatch(capturedPageUris.toList())
+                            onFinishBatch(capturedPageUris.toList(), pagesPerDoc)
                         } else {
                             Toast.makeText(context, "Snap at least 1 page first", Toast.LENGTH_SHORT).show()
                         }
@@ -553,6 +642,48 @@ fun BatchCameraScanScreen(
                     }
                 }
             }
+        }
+
+        // Custom Pages Per Document Input Dialog
+        if (showCustomPagesDialog) {
+            AlertDialog(
+                onDismissRequest = { showCustomPagesDialog = false },
+                containerColor = MaterialTheme.colorScheme.surface,
+                title = { Text("Pages Per Document") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Enter how many scanned pages to combine into each PDF/Document file:", style = MaterialTheme.typography.bodyMedium)
+                        OutlinedTextField(
+                            value = customInputText,
+                            onValueChange = { input ->
+                                if (input.all { it.isDigit() } && input.length <= 3) {
+                                    customInputText = input
+                                }
+                            },
+                            label = { Text("Pages Per File") },
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                        pagesPerDoc = num
+                        showCustomPagesDialog = false
+                    }) {
+                        Text("Apply")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCustomPagesDialog = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
 
         // Review Pages Sheet / Modal

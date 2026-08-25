@@ -25,6 +25,12 @@ class SettingsRepository(private val context: Context) {
     private val USE_A4_FORMAT = androidx.datastore.preferences.core.booleanPreferencesKey("use_a4_format")
     private val IMAGE_FORMAT = stringPreferencesKey("image_format")
     private val STORAGE_LIMIT_MB = intPreferencesKey("storage_limit_mb")
+    private val BATCH_PAGES_PER_DOC = intPreferencesKey("batch_pages_per_doc")
+
+    val batchPagesPerDoc: Flow<Int> = context.dataStore.data
+        .map { preferences ->
+            preferences[BATCH_PAGES_PER_DOC] ?: 2 // Default to 2 pages (Pair)
+        }
 
     val storageLimitMb: Flow<Int> = context.dataStore.data
         .map { preferences ->
@@ -154,6 +160,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setStorageLimitMb(limitMb: Int) {
         context.dataStore.edit { preferences ->
             preferences[STORAGE_LIMIT_MB] = limitMb
+        }
+    }
+
+    suspend fun setBatchPagesPerDoc(pages: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[BATCH_PAGES_PER_DOC] = pages.coerceAtLeast(1)
         }
     }
 }
