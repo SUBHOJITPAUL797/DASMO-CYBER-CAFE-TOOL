@@ -1513,8 +1513,13 @@ fun MainScreen(
                                                             fontWeight = FontWeight.Bold,
                                                             color = MaterialTheme.colorScheme.onSurface
                                                         )
+                                                        val formatLabel = when (item.format) {
+                                                            com.example.ui.UploadFormat.PDF -> "PDF"
+                                                            com.example.ui.UploadFormat.JPEG -> if (imageFormat.equals("WEBP", true)) "WEBP" else "JPEG"
+                                                            com.example.ui.UploadFormat.BOTH -> if (imageFormat.equals("WEBP", true)) "WEBP + PDF" else "JPEG + PDF"
+                                                        }
                                                         Text(
-                                                            text = "Format: ${item.format}",
+                                                            text = "Format: $formatLabel",
                                                             style = MaterialTheme.typography.labelSmall,
                                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                                         )

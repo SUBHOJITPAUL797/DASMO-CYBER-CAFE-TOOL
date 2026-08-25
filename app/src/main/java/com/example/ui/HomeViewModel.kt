@@ -1173,7 +1173,9 @@ class HomeViewModel(
         viewModelScope.launch {
             _isProcessing.value = true
             val queueId = java.util.UUID.randomUUID().toString()
-            val format = UploadFormat.PDF
+            val format = if (imageFormat.value.equals("JPEG", true)) UploadFormat.JPEG 
+                         else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
+                         else UploadFormat.PDF
             
             val initialItem = QueueItem(
                 id = queueId,
@@ -1551,11 +1553,12 @@ class HomeViewModel(
             documentType.trim()
         }
 
-        // Update queue item info & status
+        // Update queue item info, format & status
         _activeQueue.update { it.map { item ->
             if (item.id == queueId) item.copy(
                 personName = checkedPersonName,
                 documentType = checkedDocumentType,
+                format = format,
                 status = "Authorizing Google..."
             ) else item
         } }
