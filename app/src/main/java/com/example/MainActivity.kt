@@ -3288,17 +3288,52 @@ fun MainScreen(
 
     if (showBatchPagesSettingDialog) {
         var tempInput by remember { mutableStateOf(batchPagesPerDoc.toString()) }
-        AlertDialog(
+        androidx.compose.ui.window.Dialog(
             onDismissRequest = { showBatchPagesSettingDialog = false },
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.Layers, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text("Batch Pages Per File", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .wrapContentHeight()
+                    .padding(vertical = 16.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Layers, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                            }
+                            Column {
+                                Text("Batch Pages Per File", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                Text("Default grouping preference", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        IconButton(onClick = { showBatchPagesSettingDialog = false }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
                     Text(
                         text = "Enter how many pages to combine into each PDF/Document in Batch Mode (e.g. 5, 10, 20...):",
                         style = MaterialTheme.typography.bodyMedium,
@@ -3381,26 +3416,33 @@ fun MainScreen(
                             Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         }
                     }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val num = tempInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                        viewModel.updateBatchPagesPerDoc(num)
-                        showBatchPagesSettingDialog = false
-                    },
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("Save & Set Default")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showBatchPagesSettingDialog = false }) {
-                    Text("Cancel")
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { showBatchPagesSettingDialog = false },
+                            modifier = Modifier.weight(1f).height(46.dp),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Cancel")
+                        }
+                        Button(
+                            onClick = {
+                                val num = tempInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                                viewModel.updateBatchPagesPerDoc(num)
+                                showBatchPagesSettingDialog = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f).height(46.dp)
+                        ) {
+                            Text("Save Default", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
-        )
+        }
     }
 
     if (showBatchSetupDialog) {
@@ -3409,41 +3451,74 @@ fun MainScreen(
         var customPagesText by remember { mutableStateOf(if (batchPagesPerDoc > 4) batchPagesPerDoc.toString() else "5") }
         var rememberAsDefault by remember { mutableStateOf(true) }
 
-        AlertDialog(
+        androidx.compose.ui.window.Dialog(
             onDismissRequest = { showBatchSetupDialog = false },
-            containerColor = MaterialTheme.colorScheme.surface,
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(
-                        imageVector = Icons.Default.Layers,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(26.dp)
-                    )
-                    Text("Batch Scan Setup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "How many pages per document to merge in this batch?",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .wrapContentHeight()
+                    .padding(vertical = 16.dp),
+                shape = RoundedCornerShape(24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp,
+                shadowElevation = 8.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // Header
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Layers,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Column {
+                                Text("Batch Scan Setup", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                                Text("Pages per PDF/document", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        IconButton(
+                            onClick = { showBatchSetupDialog = false },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
 
-                    // Quick option cards
+                    // Options List
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         listOf(
                             1 to ("1 Page (Single Document)" to "Every single scan is saved as an individual file"),
-                            2 to ("2 Pages (Pair / ID Card)" to "Front & Back sides combined into 1 document / A4 sheet"),
+                            2 to ("2 Pages (Pair / ID Card)" to "Front & Back sides combined onto 1 document / A4 sheet"),
                             3 to ("3 Pages" to "3 pages merged per document"),
                             4 to ("4 Pages" to "4 pages merged per document")
                         ).forEach { (count, info) ->
                             val isSelected = selectedPages == count && !showCustomInputInSetup
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
@@ -3452,16 +3527,17 @@ fun MainScreen(
                                     }
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     RadioButton(
                                         selected = isSelected,
                                         onClick = {
                                             selectedPages = count
                                             showCustomInputInSetup = false
-                                        }
+                                        },
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(info.first, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
@@ -3475,22 +3551,23 @@ fun MainScreen(
                         val isCustomSelected = showCustomInputInSetup || selectedPages > 4
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = if (isCustomSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                            border = if (isCustomSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            color = if (isCustomSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            border = if (isCustomSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
                                     showCustomInputInSetup = true
                                 }
                         ) {
-                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     RadioButton(
                                         selected = isCustomSelected,
-                                        onClick = { showCustomInputInSetup = true }
+                                        onClick = { showCustomInputInSetup = true },
+                                        modifier = Modifier.size(20.dp)
                                     )
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text("Custom Pages (5, 10, 20...)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
@@ -3499,7 +3576,36 @@ fun MainScreen(
                                 }
 
                                 if (showCustomInputInSetup || selectedPages > 4) {
-                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        listOf(5, 10, 15, 20).forEach { presetNum ->
+                                            val isPillActive = customPagesText == presetNum.toString()
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isPillActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clickable {
+                                                        customPagesText = presetNum.toString()
+                                                        selectedPages = presetNum
+                                                    }
+                                            ) {
+                                                Text(
+                                                    text = "$presetNum",
+                                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = if (isPillActive) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                                    color = if (isPillActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(vertical = 6.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(8.dp))
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -3513,9 +3619,9 @@ fun MainScreen(
                                                     selectedPages = curr - 1
                                                 }
                                             },
-                                            modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surface, CircleShape)
+                                            modifier = Modifier.size(38.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
                                         ) {
-                                            Text("-", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                            Text("-", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                         }
 
                                         OutlinedTextField(
@@ -3547,9 +3653,9 @@ fun MainScreen(
                                                     selectedPages = curr + 1
                                                 }
                                             },
-                                            modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surface, CircleShape)
+                                            modifier = Modifier.size(38.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
                                         ) {
-                                            Text("+", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                            Text("+", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                                         }
                                     }
                                 }
@@ -3557,7 +3663,7 @@ fun MainScreen(
                         }
                     }
 
-                    // Remember default switch
+                    // Remember default checkbox
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3565,65 +3671,64 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Checkbox(checked = rememberAsDefault, onCheckedChange = { rememberAsDefault = it })
-                        Text("Save as default batch preference", style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
-            confirmButton = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(
-                        onClick = {
-                            val finalPages = if (showCustomInputInSetup) {
-                                customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
-                            } else {
-                                selectedPages.coerceIn(1, 100)
-                            }
-                            if (rememberAsDefault) {
-                                viewModel.updateBatchPagesPerDoc(finalPages)
-                            }
-                            showBatchSetupDialog = false
-                            launchContinuousBatchCamera()
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.Default.CameraAlt, contentDescription = null)
-                            Text("Start Camera Batch (Continuous)", fontWeight = FontWeight.Bold)
-                        }
+                        Checkbox(
+                            checked = rememberAsDefault,
+                            onCheckedChange = { rememberAsDefault = it },
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text("Save as default batch preference", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
 
-                    OutlinedButton(
-                        onClick = {
-                            val finalPages = if (showCustomInputInSetup) {
-                                customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
-                            } else {
-                                selectedPages.coerceIn(1, 100)
+                    // Action Buttons (Cleanly stacked, 0 overlap)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        Button(
+                            onClick = {
+                                val finalPages = if (showCustomInputInSetup) {
+                                    customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
+                                } else {
+                                    selectedPages.coerceIn(1, 100)
+                                }
+                                if (rememberAsDefault) {
+                                    viewModel.updateBatchPagesPerDoc(finalPages)
+                                }
+                                showBatchSetupDialog = false
+                                launchContinuousBatchCamera()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().height(46.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Text("Start Camera Batch (Continuous)", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                             }
-                            if (rememberAsDefault) {
-                                viewModel.updateBatchPagesPerDoc(finalPages)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                val finalPages = if (showCustomInputInSetup) {
+                                    customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
+                                } else {
+                                    selectedPages.coerceIn(1, 100)
+                                }
+                                if (rememberAsDefault) {
+                                    viewModel.updateBatchPagesPerDoc(finalPages)
+                                }
+                                showBatchSetupDialog = false
+                                launchBatchScan()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth().height(46.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Default.DocumentScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Text("Use System Document Scanner", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             }
-                            showBatchSetupDialog = false
-                            launchBatchScan()
-                        },
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(Icons.Default.DocumentScanner, contentDescription = null)
-                            Text("Use System Document Scanner", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showBatchSetupDialog = false }) {
-                    Text("Cancel")
-                }
             }
-        )
+        }
     }
 
     if (showContinuousBatchCamera) {
@@ -4913,12 +5018,38 @@ fun BatchVerificationDialog(
         }
 
         if (showCustomRegroupDialog) {
-            AlertDialog(
+            androidx.compose.ui.window.Dialog(
                 onDismissRequest = { showCustomRegroupDialog = false },
-                containerColor = MaterialTheme.colorScheme.surface,
-                title = { Text("Custom Batch Grouping", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .wrapContentHeight()
+                        .padding(vertical = 16.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Custom Batch Grouping", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            IconButton(onClick = { showCustomRegroupDialog = false }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+
                         Text(
                             text = "Enter how many pages per document to group the ${allUris.size} scanned pages (e.g. 5, 10, 20...):",
                             style = MaterialTheme.typography.bodyMedium,
@@ -5001,26 +5132,33 @@ fun BatchVerificationDialog(
                                 Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            val size = customRegroupInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                            editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
-                            showCustomRegroupDialog = false
-                        },
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("Apply & Regroup")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showCustomRegroupDialog = false }) {
-                        Text("Cancel")
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { showCustomRegroupDialog = false },
+                                modifier = Modifier.weight(1f).height(46.dp),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Cancel")
+                            }
+                            Button(
+                                onClick = {
+                                    val size = customRegroupInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                                    editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
+                                    showCustomRegroupDialog = false
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f).height(46.dp)
+                            ) {
+                                Text("Apply & Regroup", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
-            )
+            }
         }
     }
 }

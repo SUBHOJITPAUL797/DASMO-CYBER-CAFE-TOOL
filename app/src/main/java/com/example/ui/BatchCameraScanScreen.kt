@@ -21,6 +21,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -646,12 +648,38 @@ fun BatchCameraScanScreen(
 
         // Custom Pages Per Document Input Dialog
         if (showCustomPagesDialog) {
-            AlertDialog(
+            androidx.compose.ui.window.Dialog(
                 onDismissRequest = { showCustomPagesDialog = false },
-                containerColor = MaterialTheme.colorScheme.surface,
-                title = { Text("Pages Per Document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth(0.92f)
+                        .wrapContentHeight()
+                        .padding(vertical = 16.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 8.dp
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Pages Per Document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            IconButton(onClick = { showCustomPagesDialog = false }, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+
                         Text(
                             text = "Enter how many scanned pages to combine into each PDF/Document file (e.g. 5, 10, 20...):",
                             style = MaterialTheme.typography.bodyMedium,
@@ -734,26 +762,33 @@ fun BatchCameraScanScreen(
                                 Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                            pagesPerDoc = num
-                            showCustomPagesDialog = false
-                        },
-                        shape = RoundedCornerShape(10.dp)
-                    ) {
-                        Text("Apply")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showCustomPagesDialog = false }) {
-                        Text("Cancel")
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { showCustomPagesDialog = false },
+                                modifier = Modifier.weight(1f).height(46.dp),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Cancel")
+                            }
+                            Button(
+                                onClick = {
+                                    val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                                    pagesPerDoc = num
+                                    showCustomPagesDialog = false
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.weight(1f).height(46.dp)
+                            ) {
+                                Text("Apply", fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 }
-            )
+            }
         }
 
         // Review Pages Sheet / Modal
