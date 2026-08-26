@@ -180,6 +180,7 @@ fun MainScreen(
 
     var showSizeDialog by remember { mutableStateOf(false) }
     var showFolderDialog by remember { mutableStateOf(false) }
+    var showBatchPagesSettingDialog by remember { mutableStateOf(false) }
     var folderDialogMode by remember { mutableStateOf("SYNC") } // "SYNC" or "MERGE"
     var showClearJunkWarning by remember { mutableStateOf(false) }
     var showTargetSizeWarningDialog by remember { mutableStateOf(false) }
@@ -2709,13 +2710,14 @@ fun MainScreen(
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Column {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                             Text("Batch Pages Per Document", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                                             Text("Number of pages merged into each PDF/file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                         Surface(
                                             shape = RoundedCornerShape(8.dp),
-                                            color = MaterialTheme.colorScheme.primaryContainer
+                                            color = MaterialTheme.colorScheme.primaryContainer,
+                                            modifier = Modifier.clickable { showBatchPagesSettingDialog = true }
                                         ) {
                                             Text(
                                                 text = if (batchPagesPerDoc == 1) "1 Page (Single)" else if (batchPagesPerDoc == 2) "2 Pages (Pair)" else "$batchPagesPerDoc Pages",
@@ -2728,9 +2730,9 @@ fun MainScreen(
                                     }
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        listOf(1 to "1 (Single)", 2 to "2 (Pair)", 3 to "3 Pages", 4 to "4 Pages").forEach { (count, label) ->
+                                        listOf(1 to "1 (Single)", 2 to "2 (Pair)", 3 to "3", 4 to "4").forEach { (count, label) ->
                                             val isSelected = batchPagesPerDoc == count
                                             Button(
                                                 onClick = { viewModel.updateBatchPagesPerDoc(count) },
@@ -2738,10 +2740,26 @@ fun MainScreen(
                                                 shape = RoundedCornerShape(10.dp),
                                                 colors = if (isSelected) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                                                          else ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
-                                                contentPadding = PaddingValues(horizontal = 4.dp)
+                                                contentPadding = PaddingValues(horizontal = 2.dp)
                                             ) {
                                                 Text(label, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, fontSize = 11.sp)
                                             }
+                                        }
+
+                                        val isCustom = batchPagesPerDoc > 4
+                                        Button(
+                                            onClick = { showBatchPagesSettingDialog = true },
+                                            modifier = Modifier.weight(1.3f).height(40.dp),
+                                            shape = RoundedCornerShape(10.dp),
+                                            colors = if (isCustom) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                                     else ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant),
+                                            contentPadding = PaddingValues(horizontal = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = if (isCustom) "Custom ($batchPagesPerDoc)" else "Custom...",
+                                                fontWeight = if (isCustom) FontWeight.Bold else FontWeight.Normal,
+                                                fontSize = 11.sp
+                                            )
                                         }
                                     }
                                 }
@@ -3225,6 +3243,123 @@ fun MainScreen(
                 }
             }
         }
+    }
+
+    if (showBatchPagesSettingDialog) {
+        var tempInput by remember { mutableStateOf(batchPagesPerDoc.toString()) }
+        AlertDialog(
+            onDismissRequest = { showBatchPagesSettingDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.Layers, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text("Batch Pages Per File", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text(
+                        text = "Enter how many pages to combine into each PDF/Document in Batch Mode (e.g. 5, 10, 20...):",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Quick presets chips
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(1, 2, 3, 5, 10, 20).forEach { presetNum ->
+                            val isChosen = tempInput == presetNum.toString()
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isChosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { tempInput = presetNum.toString() }
+                            ) {
+                                Text(
+                                    text = "$presetNum",
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                    color = if (isChosen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Stepper & Direct TextField
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        IconButton(
+                            onClick = {
+                                val current = tempInput.toIntOrNull() ?: 2
+                                if (current > 1) tempInput = (current - 1).toString()
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                        ) {
+                            Text("-", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedTextField(
+                            value = tempInput,
+                            onValueChange = { input ->
+                                if (input.all { it.isDigit() } && input.length <= 3) {
+                                    tempInput = input
+                                }
+                            },
+                            label = { Text("Pages Per File") },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                            ),
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        IconButton(
+                            onClick = {
+                                val current = tempInput.toIntOrNull() ?: 2
+                                if (current < 100) tempInput = (current + 1).toString()
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                        ) {
+                            Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val num = tempInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                        viewModel.updateBatchPagesPerDoc(num)
+                        showBatchPagesSettingDialog = false
+                    },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Save & Set Default")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchPagesSettingDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     if (showContinuousBatchCamera) {
@@ -4425,9 +4560,9 @@ fun BatchVerificationDialog(
                             }
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                listOf(1 to "1 (Single)", 2 to "2 (Pair)", 3 to "3 Pages", 4 to "4 Pages").forEach { (size, label) ->
+                                listOf(1 to "1", 2 to "2", 3 to "3", 4 to "4", 5 to "5", 10 to "10").forEach { (size, label) ->
                                     OutlinedButton(
                                         onClick = {
                                             editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
@@ -4443,7 +4578,7 @@ fun BatchVerificationDialog(
                                     onClick = { showCustomRegroupDialog = true },
                                     modifier = Modifier.height(36.dp),
                                     shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 8.dp)
+                                    contentPadding = PaddingValues(horizontal = 6.dp)
                                 ) {
                                     Text("Custom", fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                                 }
@@ -4516,33 +4651,104 @@ fun BatchVerificationDialog(
         if (showCustomRegroupDialog) {
             AlertDialog(
                 onDismissRequest = { showCustomRegroupDialog = false },
-                title = { Text("Custom Grouping") },
+                containerColor = MaterialTheme.colorScheme.surface,
+                title = { Text("Custom Batch Grouping", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Enter how many pages per document to group the ${allUris.size} scanned pages:")
-                        OutlinedTextField(
-                            value = customRegroupInput,
-                            onValueChange = { input ->
-                                if (input.all { it.isDigit() } && input.length <= 3) {
-                                    customRegroupInput = input
-                                }
-                            },
-                            label = { Text("Pages Per Document") },
-                            singleLine = true,
-                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text(
+                            text = "Enter how many pages per document to group the ${allUris.size} scanned pages (e.g. 5, 10, 20...):",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // Quick preset pills
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(1, 2, 3, 5, 10, 20).forEach { presetNum ->
+                                val isChosen = customRegroupInput == presetNum.toString()
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isChosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { customRegroupInput = presetNum.toString() }
+                                ) {
+                                    Text(
+                                        text = "$presetNum",
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        color = if (isChosen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Stepper & Direct TextField
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    val current = customRegroupInput.toIntOrNull() ?: 2
+                                    if (current > 1) customRegroupInput = (current - 1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            ) {
+                                Text("-", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            OutlinedTextField(
+                                value = customRegroupInput,
+                                onValueChange = { input ->
+                                    if (input.all { it.isDigit() } && input.length <= 3) {
+                                        customRegroupInput = input
+                                    }
+                                },
+                                label = { Text("Pages Per Doc") },
+                                singleLine = true,
+                                textStyle = androidx.compose.ui.text.TextStyle(
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            IconButton(
+                                onClick = {
+                                    val current = customRegroupInput.toIntOrNull() ?: 2
+                                    if (current < 100) customRegroupInput = (current + 1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            ) {
+                                Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    Button(onClick = {
-                        val size = customRegroupInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                        editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
-                        showCustomRegroupDialog = false
-                    }) {
-                        Text("Regroup")
+                    Button(
+                        onClick = {
+                            val size = customRegroupInput.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                            editableGroups = allUris.chunked(size).map { com.example.ui.BatchGroup(uris = it, isIdCard = false) }
+                            showCustomRegroupDialog = false
+                        },
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("Apply & Regroup")
                     }
                 },
                 dismissButton = {

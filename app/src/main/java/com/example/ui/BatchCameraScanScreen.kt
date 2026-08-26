@@ -649,32 +649,102 @@ fun BatchCameraScanScreen(
             AlertDialog(
                 onDismissRequest = { showCustomPagesDialog = false },
                 containerColor = MaterialTheme.colorScheme.surface,
-                title = { Text("Pages Per Document") },
+                title = { Text("Pages Per Document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text("Enter how many scanned pages to combine into each PDF/Document file:", style = MaterialTheme.typography.bodyMedium)
-                        OutlinedTextField(
-                            value = customInputText,
-                            onValueChange = { input ->
-                                if (input.all { it.isDigit() } && input.length <= 3) {
-                                    customInputText = input
-                                }
-                            },
-                            label = { Text("Pages Per File") },
-                            singleLine = true,
-                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                            ),
-                            modifier = Modifier.fillMaxWidth()
+                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        Text(
+                            text = "Enter how many scanned pages to combine into each PDF/Document file (e.g. 5, 10, 20...):",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // Quick preset pills
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(1, 2, 3, 5, 10, 20).forEach { presetNum ->
+                                val isChosen = customInputText == presetNum.toString()
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isChosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { customInputText = presetNum.toString() }
+                                ) {
+                                    Text(
+                                        text = "$presetNum",
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                        color = if (isChosen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Stepper & Direct TextField
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    val current = customInputText.toIntOrNull() ?: 2
+                                    if (current > 1) customInputText = (current - 1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            ) {
+                                Text("-", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            OutlinedTextField(
+                                value = customInputText,
+                                onValueChange = { input ->
+                                    if (input.all { it.isDigit() } && input.length <= 3) {
+                                        customInputText = input
+                                    }
+                                },
+                                label = { Text("Pages Per File") },
+                                singleLine = true,
+                                textStyle = androidx.compose.ui.text.TextStyle(
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                ),
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            IconButton(
+                                onClick = {
+                                    val current = customInputText.toIntOrNull() ?: 2
+                                    if (current < 100) customInputText = (current + 1).toString()
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            ) {
+                                Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    Button(onClick = {
-                        val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                        pagesPerDoc = num
-                        showCustomPagesDialog = false
-                    }) {
+                    Button(
+                        onClick = {
+                            val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                            pagesPerDoc = num
+                            showCustomPagesDialog = false
+                        },
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
                         Text("Apply")
                     }
                 },
