@@ -3688,9 +3688,7 @@ fun MainScreen(
                                 } else {
                                     selectedPages.coerceIn(1, 100)
                                 }
-                                if (rememberAsDefault) {
-                                    viewModel.updateBatchPagesPerDoc(finalPages)
-                                }
+                                viewModel.updateBatchPagesPerDoc(finalPages)
                                 showBatchSetupDialog = false
                                 launchContinuousBatchCamera()
                             },
@@ -3711,9 +3709,7 @@ fun MainScreen(
                                 } else {
                                     selectedPages.coerceIn(1, 100)
                                 }
-                                if (rememberAsDefault) {
-                                    viewModel.updateBatchPagesPerDoc(finalPages)
-                                }
+                                viewModel.updateBatchPagesPerDoc(finalPages)
                                 showBatchSetupDialog = false
                                 launchBatchScan()
                             },
