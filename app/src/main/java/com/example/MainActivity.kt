@@ -181,6 +181,7 @@ fun MainScreen(
     var showSizeDialog by remember { mutableStateOf(false) }
     var showFolderDialog by remember { mutableStateOf(false) }
     var showBatchPagesSettingDialog by remember { mutableStateOf(false) }
+    var showBatchSetupDialog by remember { mutableStateOf(false) }
     var folderDialogMode by remember { mutableStateOf("SYNC") } // "SYNC" or "MERGE"
     var showClearJunkWarning by remember { mutableStateOf(false) }
     var showTargetSizeWarningDialog by remember { mutableStateOf(false) }
@@ -794,7 +795,7 @@ fun MainScreen(
                                             pendingScanType = "BATCH"
                                             showTargetSizeWarningDialog = true
                                         } else {
-                                            launchBatchScan()
+                                            showBatchSetupDialog = true
                                         }
                                     },
                                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -1274,6 +1275,46 @@ fun MainScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
+                            }
+
+                            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { showBatchSetupDialog = true }
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Layers,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        "Batch Grouping:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        text = if (batchPagesPerDoc == 1) "1 Page / Doc (Single)" else if (batchPagesPerDoc == 2) "2 Pages / Doc (Pair)" else "$batchPagesPerDoc Pages / Doc",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                Text(
+                                    "Change ➔",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                             }
                         }
                     }
@@ -2951,7 +2992,7 @@ fun MainScreen(
                             if (pendingScanType == "SINGLE") {
                                 launchSingleScan()
                             } else if (pendingScanType == "BATCH") {
-                                launchBatchScan()
+                                showBatchSetupDialog = true
                             } else if (pendingScanType == "MULTI") {
                                 launchMultiScan()
                             }
@@ -2972,7 +3013,7 @@ fun MainScreen(
                             if (pendingScanType == "SINGLE") {
                                 launchSingleScan()
                             } else if (pendingScanType == "BATCH") {
-                                launchBatchScan()
+                                showBatchSetupDialog = true
                             } else if (pendingScanType == "MULTI") {
                                 launchMultiScan()
                             }
@@ -3356,6 +3397,229 @@ fun MainScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showBatchPagesSettingDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showBatchSetupDialog) {
+        var selectedPages by remember { mutableIntStateOf(batchPagesPerDoc) }
+        var showCustomInputInSetup by remember { mutableStateOf(batchPagesPerDoc > 4) }
+        var customPagesText by remember { mutableStateOf(if (batchPagesPerDoc > 4) batchPagesPerDoc.toString() else "5") }
+        var rememberAsDefault by remember { mutableStateOf(true) }
+
+        AlertDialog(
+            onDismissRequest = { showBatchSetupDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.Layers,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Text("Batch Scan Setup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "How many pages per document to merge in this batch?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Quick option cards
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(
+                            1 to ("1 Page (Single Document)" to "Every single scan is saved as an individual file"),
+                            2 to ("2 Pages (Pair / ID Card)" to "Front & Back sides combined into 1 document / A4 sheet"),
+                            3 to ("3 Pages" to "3 pages merged per document"),
+                            4 to ("4 Pages" to "4 pages merged per document")
+                        ).forEach { (count, info) ->
+                            val isSelected = selectedPages == count && !showCustomInputInSetup
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedPages = count
+                                        showCustomInputInSetup = false
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = {
+                                            selectedPages = count
+                                            showCustomInputInSetup = false
+                                        }
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(info.first, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                        Text(info.second, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Custom Option Card
+                        val isCustomSelected = showCustomInputInSetup || selectedPages > 4
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isCustomSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = if (isCustomSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    showCustomInputInSetup = true
+                                }
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    RadioButton(
+                                        selected = isCustomSelected,
+                                        onClick = { showCustomInputInSetup = true }
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Custom Pages (5, 10, 20...)", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+                                        Text("Enter custom number of pages per file", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+
+                                if (showCustomInputInSetup || selectedPages > 4) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        IconButton(
+                                            onClick = {
+                                                val curr = customPagesText.toIntOrNull() ?: 5
+                                                if (curr > 1) {
+                                                    customPagesText = (curr - 1).toString()
+                                                    selectedPages = curr - 1
+                                                }
+                                            },
+                                            modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surface, CircleShape)
+                                        ) {
+                                            Text("-", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                        }
+
+                                        OutlinedTextField(
+                                            value = customPagesText,
+                                            onValueChange = { input ->
+                                                if (input.all { it.isDigit() } && input.length <= 3) {
+                                                    customPagesText = input
+                                                    input.toIntOrNull()?.let { selectedPages = it }
+                                                }
+                                            },
+                                            label = { Text("Pages / Doc") },
+                                            singleLine = true,
+                                            textStyle = androidx.compose.ui.text.TextStyle(
+                                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                                fontSize = 16.sp,
+                                                fontWeight = FontWeight.Bold
+                                            ),
+                                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                            ),
+                                            modifier = Modifier.weight(1f)
+                                        )
+
+                                        IconButton(
+                                            onClick = {
+                                                val curr = customPagesText.toIntOrNull() ?: 5
+                                                if (curr < 100) {
+                                                    customPagesText = (curr + 1).toString()
+                                                    selectedPages = curr + 1
+                                                }
+                                            },
+                                            modifier = Modifier.size(36.dp).background(MaterialTheme.colorScheme.surface, CircleShape)
+                                        ) {
+                                            Text("+", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Remember default switch
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { rememberAsDefault = !rememberAsDefault },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Checkbox(checked = rememberAsDefault, onCheckedChange = { rememberAsDefault = it })
+                        Text("Save as default batch preference", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = {
+                            val finalPages = if (showCustomInputInSetup) {
+                                customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
+                            } else {
+                                selectedPages.coerceIn(1, 100)
+                            }
+                            if (rememberAsDefault) {
+                                viewModel.updateBatchPagesPerDoc(finalPages)
+                            }
+                            showBatchSetupDialog = false
+                            launchContinuousBatchCamera()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.CameraAlt, contentDescription = null)
+                            Text("Start Camera Batch (Continuous)", fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val finalPages = if (showCustomInputInSetup) {
+                                customPagesText.toIntOrNull()?.coerceIn(1, 100) ?: selectedPages
+                            } else {
+                                selectedPages.coerceIn(1, 100)
+                            }
+                            if (rememberAsDefault) {
+                                viewModel.updateBatchPagesPerDoc(finalPages)
+                            }
+                            showBatchSetupDialog = false
+                            launchBatchScan()
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Default.DocumentScanner, contentDescription = null)
+                            Text("Use System Document Scanner", fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchSetupDialog = false }) {
                     Text("Cancel")
                 }
             }
