@@ -899,14 +899,21 @@ class HomeViewModel(
         _batchVerificationGroups.value = groupedUris
     }
 
-    fun cancelPendingDocument() {
+    fun cancelPendingDocument(format: UploadFormat? = null) {
         val pending = _pendingDocuments.value.firstOrNull() ?: return
         try { pending.compressedFile.delete() } catch (e: Exception) {}
         pending.pageFiles?.forEach { file ->
             try { file.delete() } catch (e: Exception) {}
         }
         _pendingDocuments.update { it.drop(1) }
-        updateQueueStatus(pending.queueId, "Cancelled")
+        _activeQueue.update { it.map { item ->
+            if (item.id == pending.queueId) {
+                item.copy(
+                    format = format ?: item.format,
+                    status = "Cancelled"
+                )
+            } else item
+        } }
         _statusMessage.value = ""
         _isProcessing.value = false
     }
@@ -1187,9 +1194,9 @@ class HomeViewModel(
         viewModelScope.launch {
             _isProcessing.value = true
             val queueId = java.util.UUID.randomUUID().toString()
-            val format = if (imageFormat.value.equals("JPEG", true)) UploadFormat.JPEG 
+            val format = if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
                          else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
-                         else UploadFormat.PDF
+                         else UploadFormat.JPEG
             
             val initialItem = QueueItem(
                 id = queueId,
@@ -1411,9 +1418,9 @@ class HomeViewModel(
         viewModelScope.launch {
             _isProcessing.value = true
             val queueId = java.util.UUID.randomUUID().toString()
-            val format = if (imageFormat.value.equals("JPEG", true)) UploadFormat.JPEG 
+            val format = if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
                          else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
-                         else UploadFormat.PDF
+                         else UploadFormat.JPEG
             
             // Immediately add to queue monitor representing live status from start to finish
             val initialItem = QueueItem(

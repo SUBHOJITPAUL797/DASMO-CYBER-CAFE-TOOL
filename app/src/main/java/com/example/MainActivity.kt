@@ -1190,21 +1190,21 @@ fun MainScreen(
                                 ) {
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            "ID CARD LAYOUT",
+                                            "ID CARD A4 XEROX FORMAT",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            if (useA4Format) "A4 SHEET CANVAS" else "STACKED VERTICALLY",
+                                            if (useA4Format) "A4 SHEET CANVAS" else "ORIGINAL RAW CROPPED",
                                             style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.ExtraBold,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            if (useA4Format) "ID cards will be placed onto a standard A4 canvas" else "ID card sides will be stacked vertically without an A4 background",
+                                            if (useA4Format) "Front & Back placed together on upper A4 page (Cyber Cafe Xerox standard)" else "Front & Back combined closely without A4 paper margins",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -2670,8 +2670,8 @@ fun MainScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                                        Text("Standard A4 Page Canvas", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                                        Text("Format scanned pages into standard A4 canvas size", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text("ID Card A4 Xerox Page Canvas", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                        Text("Place Front & Back ID cards together on upper A4 page (Cyber Cafe Xerox standard)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     Switch(
                                         checked = useA4Format,
@@ -3765,7 +3765,7 @@ fun MainScreen(
         val presets = remember { listOf("Aadhaar Card", "PAN Card", "Voter ID", "Passport", "Driving License", "Marksheet", "Ration Card") }
 
         AlertDialog(
-            onDismissRequest = { viewModel.cancelPendingDocument() },
+            onDismissRequest = { viewModel.cancelPendingDocument(tempUploadFormat) },
             title = {
                 Text(
                     text = "Confirm Document Details",
@@ -4036,7 +4036,7 @@ fun MainScreen(
             },
             dismissButton = {
                 TextButton(
-                    onClick = { viewModel.cancelPendingDocument() }
+                    onClick = { viewModel.cancelPendingDocument(tempUploadFormat) }
                 ) {
                     Text("Cancel")
                 }

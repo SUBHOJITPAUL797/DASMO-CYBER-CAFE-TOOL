@@ -200,25 +200,18 @@ object ImageProcessor {
         val margin = 50f
 
         if (bitmaps.size == 1) {
-            // Draw single image on the A4 page
+            // Draw single image on the upper portion of the A4 page (cyber cafe single Xerox style)
             val bmp = bitmaps[0]
-            
-            // For ID cards, we shouldn't stretch them to fill the entire A4 width.
-            // A standard ID card should take up about 50-60% of the A4 width max.
-            val maxAllowedWidth = a4Width * 0.65f
-            
-            val maxDrawWidth = kotlin.math.min(a4Width - (2 * margin), maxAllowedWidth)
-            val maxDrawHeight = a4Height - (2 * margin)
+            val isPortraitCard = bmp.height > bmp.width
+            val maxAllowedWidth = if (isPortraitCard) a4Width * 0.42f else a4Width * 0.52f
+            val maxAllowedHeight = a4Height * 0.38f
 
-            val scale = kotlin.math.min(maxDrawWidth / bmp.width.toFloat(), maxDrawHeight / bmp.height.toFloat())
+            val scale = kotlin.math.min(maxAllowedWidth / bmp.width.toFloat(), maxAllowedHeight / bmp.height.toFloat())
             val drawWidth = (bmp.width * scale).toInt()
             val drawHeight = (bmp.height * scale).toInt()
 
             val left = (a4Width - drawWidth) / 2f
-            
-            // Position it towards the top center instead of dead center, for a more natural ID photocopy look
-            // (e.g. 1/4th of the way down the page)
-            val top = (a4Height / 4f) - (drawHeight / 2f)
+            val top = 180f // Positioned naturally in upper portion of page
 
             if (drawWidth > 0 && drawHeight > 0) {
                 val scaledBmp = Bitmap.createScaledBitmap(bmp, drawWidth, drawHeight, true)
@@ -227,37 +220,56 @@ object ImageProcessor {
             }
             bmp.recycle()
         } else {
-            // Stack up to 2 images (e.g., front & back scan) centered in top & bottom halves of A4
-            val halfHeight = a4Height / 2
-            for (index in 0 until kotlin.math.min(2, bitmaps.size)) {
-                val bmp = bitmaps[index]
-                
-                // For ID cards, we shouldn't stretch them to fill the entire A4 width. 
-                // A standard ID card should take up about 50-60% of the A4 width max.
-                val maxAllowedWidth = a4Width * 0.65f
-                
-                val maxDrawWidth = kotlin.math.min(a4Width - (2 * margin), maxAllowedWidth)
-                val maxDrawHeight = halfHeight - (2 * margin)
+            // Professional Cyber Cafe A4 ID Card Xerox Placement:
+            // Front & Back are placed together in the UPPER HALF of the A4 page with uniform widths,
+            // neatly centered horizontally, separated by a clean 1 cm (~80 px) gap.
+            // The entire lower half is left clean and open (standard for self-attestation signatures & bank KYC).
+            val bmp0 = bitmaps[0]
+            val bmp1 = bitmaps[1]
 
-                val scale = kotlin.math.min(maxDrawWidth / bmp.width.toFloat(), maxDrawHeight / bmp.height.toFloat())
-                
-                val drawWidth = (bmp.width * scale).toInt()
-                val drawHeight = (bmp.height * scale).toInt()
+            val isPortrait0 = bmp0.height > bmp0.width
+            val isPortrait1 = bmp1.height > bmp1.width
+            val isPortrait = isPortrait0 || isPortrait1
 
-                val left = (a4Width - drawWidth) / 2f
-                val topY = if (index == 0) {
-                    (halfHeight - drawHeight) / 2f
-                } else {
-                    halfHeight + (halfHeight - drawHeight) / 2f
-                }
+            // Target uniform width for ID cards on A4: ~50% of A4 width for landscape, ~38% for portrait
+            val targetCardWidth = if (isPortrait) (a4Width * 0.38f).toInt() else (a4Width * 0.52f).toInt()
+            val maxCardHeight = (a4Height * 0.30f).toInt()
 
-                if (drawWidth > 0 && drawHeight > 0) {
-                    val scaledBmp = Bitmap.createScaledBitmap(bmp, drawWidth, drawHeight, true)
-                    canvas.drawBitmap(scaledBmp, left, topY, null)
-                    scaledBmp.recycle()
-                }
-                bmp.recycle()
+            // Card 0 (Front)
+            val scale0 = kotlin.math.min(
+                targetCardWidth / bmp0.width.toFloat(),
+                maxCardHeight / bmp0.height.toFloat()
+            )
+            val drawW0 = (bmp0.width * scale0).toInt()
+            val drawH0 = (bmp0.height * scale0).toInt()
+            val left0 = (a4Width - drawW0) / 2f
+            val top0 = 150f // Standard top margin on A4 sheet
+
+            if (drawW0 > 0 && drawH0 > 0) {
+                val scaledBmp = Bitmap.createScaledBitmap(bmp0, drawW0, drawH0, true)
+                canvas.drawBitmap(scaledBmp, left0, top0, null)
+                scaledBmp.recycle()
             }
+            bmp0.recycle()
+
+            // Card 1 (Back)
+            val scale1 = kotlin.math.min(
+                targetCardWidth / bmp1.width.toFloat(),
+                maxCardHeight / bmp1.height.toFloat()
+            )
+            val drawW1 = (bmp1.width * scale1).toInt()
+            val drawH1 = (bmp1.height * scale1).toInt()
+            val left1 = (a4Width - drawW1) / 2f
+            val interCardGap = 80f // Clean ~1 cm gap between Front and Back
+            val top1 = top0 + drawH0 + interCardGap
+
+            if (drawW1 > 0 && drawH1 > 0) {
+                val scaledBmp = Bitmap.createScaledBitmap(bmp1, drawW1, drawH1, true)
+                canvas.drawBitmap(scaledBmp, left1, top1, null)
+                scaledBmp.recycle()
+            }
+            bmp1.recycle()
+
             // If extra unused bitmaps were loaded, recycle them too
             if (bitmaps.size > 2) {
                 for (i in 2 until bitmaps.size) {
@@ -305,8 +317,8 @@ object ImageProcessor {
 
         // 1. Smart Resolution Optimization
         // Massive camera images (e.g. 4000px+) suffer severe low-quality degradation to fit under small KB targets.
-        // Scaling down to 2400px Max-Edge preserves gorgeous 1080p-equivalent textual sharpness, and reduces byte payload by ~70%.
-        val maxTargetDimension = 2400
+        // For large target size (>=1000KB), keep up to 3200px; otherwise 2400px preserves 1080p textual sharpness.
+        val maxTargetDimension = if (targetSizeKb >= 1000) 3200 else 2400
         if (bmp.width > maxTargetDimension || bmp.height > maxTargetDimension) {
             val scale = maxTargetDimension.toFloat() / kotlin.math.max(bmp.width, bmp.height)
             val scaledW = (bmp.width * scale).toInt()
@@ -326,10 +338,11 @@ object ImageProcessor {
         bmp = enhancedBmp
 
         // 2. High-Fidelity Quality Search (Binary Search for optimized compression ratio)
+        // Search up to 98% quality to ensure maximum crispness without unnecessary degradation
         var stream = ByteArrayOutputStream()
         var lowQuality = 70
-        var highQuality = 95
-        var bestQuality = 85
+        var highQuality = 98
+        var bestQuality = 88
         
         while (lowQuality <= highQuality) {
             val midQuality = (lowQuality + highQuality) / 2
