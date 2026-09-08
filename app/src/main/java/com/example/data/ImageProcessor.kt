@@ -385,7 +385,7 @@ object ImageProcessor {
             }
         }
 
-        val compressedFile = File(file.parent ?: context.cacheDir.absolutePath, "compressed_${file.name}")
+        val compressedFile = File(file.parentFile ?: File("."), "compressed_${file.name}")
         // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
         FileOutputStream(compressedFile).use { fos ->
             fos.write(stream.toByteArray())
