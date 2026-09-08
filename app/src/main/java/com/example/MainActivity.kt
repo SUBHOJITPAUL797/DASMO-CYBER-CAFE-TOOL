@@ -1078,7 +1078,7 @@ fun MainScreen(
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "Better lossless quality" else "Standard compression",
+                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "Higher quality & sharper text" else "Standard compression",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -2750,7 +2750,7 @@ fun MainScreen(
                                 // Compression Codec (WEBP / JPEG)
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text("Compression Codec", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                                    Text("WEBP gives better lossless compression to reach target KB. JPEG is standard.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("WEBP preserves sharper text & edges to reach target KB. JPEG is standard.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
