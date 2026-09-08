@@ -1235,7 +1235,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing preview..."
                 updateQueueStatus(queueId, "Compressing preview...")
-                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
                 
                 try { resultFile.delete() } catch (e: Exception) {}
 
@@ -1366,7 +1366,7 @@ class HomeViewModel(
                     }
 
                     val targetKb = targetSizeKb.value
-                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
                     try { resultFile.delete() } catch (e: Exception) {}
 
                     compressedFile.copyTo(finalLocalFile, overwrite = true)
@@ -1460,7 +1460,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing to ${targetKb}KB..."
                 updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, imageFormat.value)
+                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
 
                 // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
                 paths.forEach { path ->
@@ -1607,7 +1607,9 @@ class HomeViewModel(
             val localCopy = File(context.filesDir, finalJpgName)
             try {
                 pending.compressedFile.copyTo(localCopy, overwrite = true)
-                ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+                if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
+                    ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+                }
             } catch (ecop: Exception) {
                 ecop.printStackTrace()
             }

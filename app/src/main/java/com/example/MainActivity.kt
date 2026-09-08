@@ -1050,33 +1050,51 @@ fun MainScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                // Card 3 (Image Format)
+                                // Card 3 (Output Format: PDF / JPEG / BOTH)
+                                val currentOutputFormat = when (imageFormat.uppercase()) {
+                                    "JPEG" -> "JPEG"
+                                    "BOTH" -> "BOTH"
+                                    else -> "PDF"
+                                }
                                 Card(
                                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                                     shape = RoundedCornerShape(16.dp),
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable { 
-                                            viewModel.updateImageFormat(if (imageFormat == "WEBP") "JPEG" else "WEBP")
+                                            val nextFormat = when (currentOutputFormat) {
+                                                "PDF" -> "JPEG"
+                                                "JPEG" -> "BOTH"
+                                                else -> "PDF"
+                                            }
+                                            viewModel.updateImageFormat(nextFormat)
                                         }
                                 ) {
                                     Column(modifier = Modifier.padding(12.dp)) {
                                         Text(
-                                            "IMAGE FORMAT",
+                                            "OUTPUT FORMAT",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            imageFormat,
+                                            when (currentOutputFormat) {
+                                                "BOTH" -> "BOTH (JPG+PDF)"
+                                                "JPEG" -> "JPEG (.jpg)"
+                                                else -> "PDF (.pdf)"
+                                            },
                                             style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.ExtraBold,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            if (imageFormat == "WEBP") "Smaller size, lossless" else "Wider compatibility",
+                                            when (currentOutputFormat) {
+                                                "BOTH" -> "Save both Image & PDF"
+                                                "JPEG" -> "Standard JPG for portals"
+                                                else -> "Single / Multi-page PDF"
+                                            },
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -1559,8 +1577,8 @@ fun MainScreen(
                                                         )
                                                         val formatLabel = when (item.format) {
                                                             com.example.ui.UploadFormat.PDF -> "PDF"
-                                                            com.example.ui.UploadFormat.JPEG -> if (imageFormat.equals("WEBP", true)) "WEBP" else "JPEG"
-                                                            com.example.ui.UploadFormat.BOTH -> if (imageFormat.equals("WEBP", true)) "WEBP + PDF" else "JPEG + PDF"
+                                                            com.example.ui.UploadFormat.JPEG -> "JPEG"
+                                                            com.example.ui.UploadFormat.BOTH -> "JPEG + PDF"
                                                         }
                                                         Text(
                                                             text = "Format: $formatLabel",
@@ -3996,8 +4014,8 @@ fun MainScreen(
                             }
                             val fileExt = when (tempUploadFormat) {
                                 UploadFormat.PDF -> ".pdf"
-                                UploadFormat.JPEG -> if (imageFormat.equals("WEBP", ignoreCase = true)) ".webp" else ".jpeg"
-                                UploadFormat.BOTH -> if (imageFormat.equals("WEBP", ignoreCase = true)) ".webp + .pdf" else ".jpeg + .pdf"
+                                UploadFormat.JPEG -> ".jpeg"
+                                UploadFormat.BOTH -> ".jpeg + .pdf"
                             }
                             Text(
                                 "$displayBaseName$fileExt",

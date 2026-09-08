@@ -39,7 +39,7 @@ class SettingsRepository(private val context: Context) {
 
     val imageFormat: Flow<String> = context.dataStore.data
         .map { preferences ->
-            preferences[IMAGE_FORMAT] ?: "WEBP" // Default to WEBP
+            preferences[IMAGE_FORMAT] ?: "PDF" // Default to PDF for cyber cafe standard
         }
 
     val targetSizeKb: Flow<Int> = context.dataStore.data

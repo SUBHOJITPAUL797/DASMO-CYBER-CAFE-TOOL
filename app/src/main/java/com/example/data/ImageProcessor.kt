@@ -283,7 +283,7 @@ object ImageProcessor {
         outputFile
     }
 
-    private fun saveBitmap(bitmap: Bitmap, file: File, format: String = "WEBP") {
+    private fun saveBitmap(bitmap: Bitmap, file: File, format: String = "JPEG") {
         val fos = FileOutputStream(file)
         val compressFormat = if (format == "WEBP") {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
@@ -300,7 +300,7 @@ object ImageProcessor {
         fos.close()
     }
 
-    suspend fun compressImage(file: File, targetSizeKb: Int, format: String = "WEBP"): File = withContext(Dispatchers.IO) {
+    suspend fun compressImage(file: File, targetSizeKb: Int, format: String = "JPEG"): File = withContext(Dispatchers.IO) {
         var bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw Exception("Failed to decode image file structure")
         val targetSizeBytes = targetSizeKb * 1024
 
