@@ -284,7 +284,6 @@ object ImageProcessor {
     }
 
     private fun saveBitmap(bitmap: Bitmap, file: File, format: String = "JPEG") {
-        val fos = FileOutputStream(file)
         val compressFormat = if (format == "WEBP") {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                 Bitmap.CompressFormat.WEBP_LOSSY
@@ -295,9 +294,10 @@ object ImageProcessor {
         } else {
             Bitmap.CompressFormat.JPEG
         }
-        bitmap.compress(compressFormat, 95, fos)
-        fos.flush()
-        fos.close()
+        // BUG FIX: use{} ensures stream is ALWAYS closed, even if compress() throws (OOM etc.)
+        FileOutputStream(file).use { fos ->
+            bitmap.compress(compressFormat, 95, fos)
+        }
     }
 
     suspend fun compressImage(file: File, targetSizeKb: Int, format: String = "JPEG"): File = withContext(Dispatchers.IO) {
@@ -385,11 +385,11 @@ object ImageProcessor {
             }
         }
 
-        val compressedFile = File(file.parent, "compressed_${file.name}")
-        val fos = FileOutputStream(compressedFile)
-        fos.write(stream.toByteArray())
-        fos.flush()
-        fos.close()
+        val compressedFile = File(file.parent ?: context.cacheDir.absolutePath, "compressed_${file.name}")
+        // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
+        FileOutputStream(compressedFile).use { fos ->
+            fos.write(stream.toByteArray())
+        }
         
         bmp.recycle() // Release decoder bitmap allocation
         compressedFile
@@ -528,10 +528,10 @@ object ImageProcessor {
         }
 
         if (bestStream.size() > 0) {
-            val fos = FileOutputStream(outputFile)
-            fos.write(bestStream.toByteArray())
-            fos.flush()
-            fos.close()
+            // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
+            FileOutputStream(outputFile).use { fos ->
+                fos.write(bestStream.toByteArray())
+            }
             return@withContext outputFile
         }
         
@@ -607,10 +607,10 @@ object ImageProcessor {
         originalBitmap.recycle()
 
         if (bestStream.size() > 0) {
-            val fos = FileOutputStream(outputFile)
-            fos.write(bestStream.toByteArray())
-            fos.flush()
-            fos.close()
+            // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
+            FileOutputStream(outputFile).use { fos ->
+                fos.write(bestStream.toByteArray())
+            }
             return@withContext outputFile
         }
         

@@ -141,6 +141,8 @@ class HomeViewModel(
     private var authListenerRegistration: ListenerRegistration? = null
     private var usersListenerRegistration: ListenerRegistration? = null
     private var currentSessionToken: String? = null
+    // BUG FIX: track the auth listening job to prevent duplicate collectors if called multiple times
+    private var authListeningJob: kotlinx.coroutines.Job? = null
 
     private val _authState = MutableStateFlow(AuthState.LOADING)
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
@@ -177,7 +179,9 @@ class HomeViewModel(
     fun startAuthListening(deviceId: String) {
         val currentModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
         addDbLog("startAuthListening: deviceId=$deviceId, Model=$currentModel")
-        viewModelScope.launch {
+        // BUG FIX: cancel previous auth listening job to avoid stacking up duplicate collectors
+        authListeningJob?.cancel()
+        authListeningJob = viewModelScope.launch {
             googleEmail.collect { email ->
                 if (email.isNullOrEmpty()) {
                     addDbLog("No user signed in. State -> NOT_LOGGED_IN")
@@ -1142,8 +1146,9 @@ class HomeViewModel(
             // For portrait documents (like Voter ID), check if it's smaller than a typical A4 page.
             // A full A4 document is typically > 5 Megapixels.
             // If the area is less than 4.5 Megapixels, we consider it an ID card.
-            val area = width * height
-            if (area < 4_500_000) return@withContext true
+            // BUG FIX: cast to Long to prevent Int overflow on high-res images
+            val area = width.toLong() * height.toLong()
+            if (area < 4_500_000L) return@withContext true
             
             return@withContext false
         } catch (e: Exception) {
@@ -1615,9 +1620,14 @@ class HomeViewModel(
             // Save locally first to guarantee offline record!
             val localCopy = File(context.filesDir, finalJpgName)
             try {
-                pending.compressedFile.copyTo(localCopy, overwrite = true)
+                // BUG FIX: guard against FileNotFoundException if file was cleaned up by a race/cancel
+                if (pending.compressedFile.exists()) {
+                    pending.compressedFile.copyTo(localCopy, overwrite = true)
+                }
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                    ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+                    if (localCopy.exists()) {
+                        ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+                    }
                 }
             } catch (ecop: Exception) {
                 ecop.printStackTrace()
@@ -2146,54 +2156,59 @@ class HomeViewModel(
                     return@launch
                 }
                 
-                val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
+            val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
                 val pdfFile = File(context.cacheDir, "merged_${java.util.UUID.randomUUID()}.pdf")
                 val filesToMerge = imagePaths.map { File(it) }
                 
                 updateQueueStatus(queueId, "Generating PDF...")
-                ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb)
-                
-                val safeLocalCopy = File(context.filesDir, "merged_${java.util.UUID.randomUUID()}.pdf")
-                pdfFile.inputStream().use { input ->
-                    safeLocalCopy.outputStream().use { output -> input.copyTo(output) }
-                }
-                
-                ImageProcessor.exportToPublicDocuments(context, safeLocalCopy, finalFileName, "application/pdf")
-                
-                var isUploaded = false
-                val email = googleEmail.value
-                val token = if (email != null) getAccessToken(context, email) else null
-                if (token != null) {
-                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                    val uploadParentId = folderId ?: driveFolderId.value
+                try {
+                    ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb)
                     
-                    isUploaded = retryIO(times = 3) {
-                        GoogleDriveClient.uploadFile(
-                            accessToken = token,
-                            file = pdfFile,
-                            mimeType = "application/pdf",
-                            fileName = finalFileName,
-                            parentId = uploadParentId
-                        )
+                    val safeLocalCopy = File(context.filesDir, "merged_${java.util.UUID.randomUUID()}.pdf")
+                    pdfFile.inputStream().use { input ->
+                        safeLocalCopy.outputStream().use { output -> input.copyTo(output) }
                     }
+                    
+                    ImageProcessor.exportToPublicDocuments(context, safeLocalCopy, finalFileName, "application/pdf")
+                    
+                    var isUploaded = false
+                    val email = googleEmail.value
+                    val token = if (email != null) getAccessToken(context, email) else null
+                    if (token != null) {
+                        updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                        val uploadParentId = folderId ?: driveFolderId.value
+                        
+                        isUploaded = retryIO(times = 3) {
+                            GoogleDriveClient.uploadFile(
+                                accessToken = token,
+                                file = pdfFile,
+                                mimeType = "application/pdf",
+                                fileName = finalFileName,
+                                parentId = uploadParentId
+                            )
+                        }
+                    }
+                    
+                    val mergedEntity = DocumentEntity(
+                        fileName = finalFileName,
+                        personName = "Merged",
+                        documentType = "PDF",
+                        localFilePath = safeLocalCopy.absolutePath,
+                        isUploaded = isUploaded,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    val id = database.documentDao().insertDocument(mergedEntity)
+                    if (id != -1L) {
+                        incrementUserScannedCount()
+                    }
+                    
+                    updateQueueStatus(queueId, "Completed - Merged successfully!")
+                    _statusMessage.value = "Merged successfully!"
+                    updatePublicFolderSize()
+                } finally {
+                    // BUG FIX: always clean up temp pdfFile from cacheDir to avoid cache bloat
+                    try { pdfFile.delete() } catch (ed: Exception) {}
                 }
-                
-                val mergedEntity = DocumentEntity(
-                    fileName = finalFileName,
-                    personName = "Merged",
-                    documentType = "PDF",
-                    localFilePath = safeLocalCopy.absolutePath,
-                    isUploaded = isUploaded,
-                    timestamp = System.currentTimeMillis()
-                )
-                val id = database.documentDao().insertDocument(mergedEntity)
-                if (id != -1L) {
-                    incrementUserScannedCount()
-                }
-                
-                updateQueueStatus(queueId, "Completed - Merged successfully!")
-                _statusMessage.value = "Merged successfully!"
-                updatePublicFolderSize()
                 
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -2404,7 +2419,7 @@ class HomeViewModel(
             "gemini-2.0-flash",
             "gemini-1.5-flash",
             "gemini-1.5-pro",
-            "gemini-3.5-flash"
+            "gemini-2.0-flash-lite"  // BUG FIX: was "gemini-3.5-flash" which doesn't exist
         )
 
         for (model in geminiModels) {
