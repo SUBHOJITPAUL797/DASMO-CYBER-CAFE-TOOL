@@ -24,6 +24,7 @@ class SettingsRepository(private val context: Context) {
     private val AUTO_ENHANCE_ENABLED = androidx.datastore.preferences.core.booleanPreferencesKey("auto_enhance_enabled")
     private val USE_A4_FORMAT = androidx.datastore.preferences.core.booleanPreferencesKey("use_a4_format")
     private val IMAGE_FORMAT = stringPreferencesKey("image_format")
+    private val COMPRESSION_CODEC = stringPreferencesKey("compression_codec")
     private val STORAGE_LIMIT_MB = intPreferencesKey("storage_limit_mb")
     private val BATCH_PAGES_PER_DOC = intPreferencesKey("batch_pages_per_doc")
 
@@ -39,7 +40,12 @@ class SettingsRepository(private val context: Context) {
 
     val imageFormat: Flow<String> = context.dataStore.data
         .map { preferences ->
-            preferences[IMAGE_FORMAT] ?: "PDF" // Default to PDF for cyber cafe standard
+            preferences[IMAGE_FORMAT] ?: "PDF" // Default to PDF output format for cyber cafe standard
+        }
+
+    val compressionCodec: Flow<String> = context.dataStore.data
+        .map { preferences ->
+            preferences[COMPRESSION_CODEC] ?: "WEBP" // Default to WEBP for superior lossless compression
         }
 
     val targetSizeKb: Flow<Int> = context.dataStore.data
@@ -154,6 +160,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setImageFormat(format: String) {
         context.dataStore.edit { preferences ->
             preferences[IMAGE_FORMAT] = format
+        }
+    }
+
+    suspend fun setCompressionCodec(codec: String) {
+        context.dataStore.edit { preferences ->
+            preferences[COMPRESSION_CODEC] = codec
         }
     }
 

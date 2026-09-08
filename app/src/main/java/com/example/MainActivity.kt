@@ -131,6 +131,7 @@ fun MainScreen(
     val documents by viewModel.documents.collectAsStateWithLifecycle()
     val targetSizeKb by viewModel.targetSizeKb.collectAsStateWithLifecycle()
     val imageFormat by viewModel.imageFormat.collectAsStateWithLifecycle()
+    val compressionCodec by viewModel.compressionCodec.collectAsStateWithLifecycle()
     val enableAiAnalysis by viewModel.enableAiAnalysis.collectAsStateWithLifecycle()
     val showConfirmation by viewModel.showConfirmation.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
@@ -1050,51 +1051,34 @@ fun MainScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                // Card 3 (Output Format: PDF / JPEG / BOTH)
-                                val currentOutputFormat = when (imageFormat.uppercase()) {
-                                    "JPEG" -> "JPEG"
-                                    "BOTH" -> "BOTH"
-                                    else -> "PDF"
-                                }
+                                // Card 3 (Compression Codec: WEBP / JPEG)
                                 Card(
                                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                                     shape = RoundedCornerShape(16.dp),
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable { 
-                                            val nextFormat = when (currentOutputFormat) {
-                                                "PDF" -> "JPEG"
-                                                "JPEG" -> "BOTH"
-                                                else -> "PDF"
-                                            }
-                                            viewModel.updateImageFormat(nextFormat)
+                                            val nextCodec = if (compressionCodec.equals("WEBP", ignoreCase = true)) "JPEG" else "WEBP"
+                                            viewModel.updateCompressionCodec(nextCodec)
                                         }
                                 ) {
                                     Column(modifier = Modifier.padding(12.dp)) {
                                         Text(
-                                            "OUTPUT FORMAT",
+                                            "COMPRESSION",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.primary
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            when (currentOutputFormat) {
-                                                "BOTH" -> "BOTH (JPG+PDF)"
-                                                "JPEG" -> "JPEG (.jpg)"
-                                                else -> "PDF (.pdf)"
-                                            },
+                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "WEBP" else "JPEG",
                                             style = MaterialTheme.typography.titleMedium,
                                             fontWeight = FontWeight.ExtraBold,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
-                                            when (currentOutputFormat) {
-                                                "BOTH" -> "Save both Image & PDF"
-                                                "JPEG" -> "Standard JPG for portals"
-                                                else -> "Single / Multi-page PDF"
-                                            },
+                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "Better lossless quality" else "Standard compression",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -2741,6 +2725,7 @@ fun MainScreen(
                                 // Output Format (JPEG / PDF / BOTH)
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text("Default Output Format", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                    Text("Controls whether output is saved as PDF, JPEG, or both", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2755,6 +2740,31 @@ fun MainScreen(
                                                          else ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
                                             ) {
                                                 Text(format, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, style = MaterialTheme.typography.labelMedium)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                                // Compression Codec (WEBP / JPEG)
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text("Compression Codec", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                                    Text("WEBP gives better lossless compression to reach target KB. JPEG is standard.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        listOf("WEBP", "JPEG").forEach { codec ->
+                                            val isSelected = compressionCodec.equals(codec, ignoreCase = true)
+                                            Button(
+                                                onClick = { viewModel.updateCompressionCodec(codec) },
+                                                modifier = Modifier.weight(1f).height(40.dp),
+                                                shape = RoundedCornerShape(10.dp),
+                                                colors = if (isSelected) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                                         else ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            ) {
+                                                Text(codec, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal, style = MaterialTheme.typography.labelMedium)
                                             }
                                         }
                                     }

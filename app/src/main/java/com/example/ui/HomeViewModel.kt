@@ -129,6 +129,9 @@ class HomeViewModel(
         .stateIn(viewModelScope, SharingStarted.Lazily, 500)
 
     val imageFormat = settingsRepository.imageFormat
+        .stateIn(viewModelScope, SharingStarted.Lazily, "PDF")
+
+    val compressionCodec = settingsRepository.compressionCodec
         .stateIn(viewModelScope, SharingStarted.Lazily, "WEBP")
 
     val autoEnhanceEnabled = settingsRepository.autoEnhanceEnabled
@@ -852,6 +855,12 @@ class HomeViewModel(
         }
     }
 
+    fun updateCompressionCodec(codec: String) {
+        viewModelScope.launch {
+            settingsRepository.setCompressionCodec(codec)
+        }
+    }
+
     fun updateAutoEnhanceEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settingsRepository.setAutoEnhanceEnabled(enabled)
@@ -1235,7 +1244,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing preview..."
                 updateQueueStatus(queueId, "Compressing preview...")
-                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
                 
                 try { resultFile.delete() } catch (e: Exception) {}
 
@@ -1366,7 +1375,7 @@ class HomeViewModel(
                     }
 
                     val targetKb = targetSizeKb.value
-                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
                     try { resultFile.delete() } catch (e: Exception) {}
 
                     compressedFile.copyTo(finalLocalFile, overwrite = true)
@@ -1460,7 +1469,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing to ${targetKb}KB..."
                 updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, "JPEG")
+                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
 
                 // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
                 paths.forEach { path ->
