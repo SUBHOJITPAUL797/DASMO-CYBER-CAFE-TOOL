@@ -46,6 +46,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import com.example.data.ImageProcessor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -250,7 +251,8 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                                     cropScale, cropOffsetX, cropOffsetY
                                 )
                                 if (jpgFile != null) {
-                                    Toast.makeText(context, "Saved to ${jpgFile.absolutePath}", Toast.LENGTH_LONG).show()
+                                    ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
+                                    Toast.makeText(context, "Saved to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
                                 } else {
                                     Toast.makeText(context, "Failed to save", Toast.LENGTH_SHORT).show()
                                 }

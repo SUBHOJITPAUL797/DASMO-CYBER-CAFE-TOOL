@@ -1139,16 +1139,18 @@ class HomeViewModel(
             }
             val width = options.outWidth
             val height = options.outHeight
+            if (width <= 0 || height <= 0) return@withContext false
             
             // Landscape documents are almost always ID cards
             if (width > height) return@withContext true
             
-            // For portrait documents (like Voter ID), check if it's smaller than a typical A4 page.
-            // A full A4 document is typically > 5 Megapixels.
-            // If the area is less than 4.5 Megapixels, we consider it an ID card.
-            // BUG FIX: cast to Long to prevent Int overflow on high-res images
+            // For portrait documents (like Voter ID / EPIC card, portrait student ID):
+            // Ratio (height / width) of standard ID-1 card is ~1.58. Accept typical phone scan crops (1.30f..1.95f).
+            val ratio = height.toFloat() / width.toFloat()
+            if (ratio in 1.30f..1.95f) return@withContext true
+            
             val area = width.toLong() * height.toLong()
-            if (area < 4_500_000L) return@withContext true
+            if (area < 6_000_000L) return@withContext true
             
             return@withContext false
         } catch (e: Exception) {
@@ -1232,7 +1234,7 @@ class HomeViewModel(
                 _statusMessage.value = "Creating preview image..."
                 updateQueueStatus(queueId, "Creating preview image...")
                 val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
-                val isId = imageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, imageUris.first())
+                val isId = imageUris.isNotEmpty() && useA4Format.value && (imageUris.size in 1..2) && (imageUris.size == 2 || isImageIdCard(context, imageUris.first()))
                 val resultFile = if (isId) {
                     ImageProcessor.combineImagesToA4(pageFiles.map { it.absolutePath }, combinedFile)
                 } else {
@@ -1249,7 +1251,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing preview..."
                 updateQueueStatus(queueId, "Compressing preview...")
-                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
                 
                 try { resultFile.delete() } catch (e: Exception) {}
 
@@ -1306,7 +1308,7 @@ class HomeViewModel(
                             personName,
                             documentType,
                             format,
-                            pageFiles = pageFiles
+                            pageFiles = if (!isId) pageFiles else null
                         )
                     }
                 }
@@ -1366,7 +1368,7 @@ class HomeViewModel(
                     }
 
                     val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
-                    isId = newPageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, newPageUris.first())
+                    isId = newPageUris.isNotEmpty() && useA4Format.value && (newPageUris.size in 1..2) && (newPageUris.size == 2 || isImageIdCard(context, newPageUris.first()))
                     val resultFile = if (isId) {
                         ImageProcessor.combineImagesToA4(tempPageFiles.map { it.absolutePath }, combinedFile)
                     } else {
@@ -1380,7 +1382,7 @@ class HomeViewModel(
                     }
 
                     val targetKb = targetSizeKb.value
-                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
                     try { resultFile.delete() } catch (e: Exception) {}
 
                     compressedFile.copyTo(finalLocalFile, overwrite = true)
@@ -1457,7 +1459,7 @@ class HomeViewModel(
 
                 // 2. Combine images (respecting A4 scan modes)
                 val combinedFile = File(context.cacheDir, "combined_${java.util.UUID.randomUUID()}.jpeg")
-                val isId = imageUris.isNotEmpty() && useA4Format.value && isImageIdCard(context, imageUris.first())
+                val isId = imageUris.isNotEmpty() && useA4Format.value && (imageUris.size in 1..2) && (imageUris.size == 2 || isImageIdCard(context, imageUris.first()))
                 val resultFile = if (isId) {
                     ImageProcessor.combineImagesToA4(paths, combinedFile)
                 } else {
@@ -1474,7 +1476,7 @@ class HomeViewModel(
                 val targetKb = targetSizeKb.value
                 _statusMessage.value = "Compressing to ${targetKb}KB..."
                 updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value)
+                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
 
                 // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
                 paths.forEach { path ->
@@ -1708,9 +1710,9 @@ class HomeViewModel(
                     val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
                     try {
                         if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
-                            ImageProcessor.convertToMultiPagePdf(pending.pageFiles, pdfFile, targetSizeKb.value)
+                            ImageProcessor.convertToMultiPagePdf(pending.pageFiles, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                         } else {
-                            ImageProcessor.convertToPdf(pending.compressedFile, pdfFile, targetSizeKb.value)
+                            ImageProcessor.convertToPdf(pending.compressedFile, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                         }
                         ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
 
@@ -1955,9 +1957,9 @@ class HomeViewModel(
                                 val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
                                 try {
                                     if (pageFiles != null && pageFiles.isNotEmpty()) {
-                                        ImageProcessor.convertToMultiPagePdf(pageFiles, pdfFile, targetSizeKb.value)
+                                        ImageProcessor.convertToMultiPagePdf(pageFiles, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                                     } else {
-                                        ImageProcessor.convertToPdf(safeLocalCopy, pdfFile, targetSizeKb.value)
+                                        ImageProcessor.convertToPdf(safeLocalCopy, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                                     }
                                     ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
 
@@ -2162,7 +2164,7 @@ class HomeViewModel(
                 
                 updateQueueStatus(queueId, "Generating PDF...")
                 try {
-                    ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb)
+                    ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb, autoEnhance = autoEnhanceEnabled.value)
                     
                     val safeLocalCopy = File(context.filesDir, "merged_${java.util.UUID.randomUUID()}.pdf")
                     pdfFile.inputStream().use { input ->

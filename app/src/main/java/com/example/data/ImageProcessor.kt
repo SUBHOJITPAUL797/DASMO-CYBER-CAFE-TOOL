@@ -300,7 +300,12 @@ object ImageProcessor {
         }
     }
 
-    suspend fun compressImage(file: File, targetSizeKb: Int, format: String = "JPEG"): File = withContext(Dispatchers.IO) {
+    suspend fun compressImage(
+        file: File,
+        targetSizeKb: Int,
+        format: String = "JPEG",
+        autoEnhance: Boolean = true
+    ): File = withContext(Dispatchers.IO) {
         var bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw Exception("Failed to decode image file structure")
         val targetSizeBytes = targetSizeKb * 1024
 
@@ -332,10 +337,14 @@ object ImageProcessor {
             }
         }
 
-        // Apply Smart Text-Preserving & Solid Background Flattening Filter
-        val enhancedBmp = applySmartTextEnhancement(bmp)
-        bmp.recycle()
-        bmp = enhancedBmp
+        // Apply Smart Text Enhancement only when autoEnhance is enabled
+        if (autoEnhance) {
+            val enhancedBmp = applySmartTextEnhancement(bmp)
+            if (enhancedBmp != bmp) {
+                bmp.recycle()
+                bmp = enhancedBmp
+            }
+        }
 
         // 2. High-Fidelity Quality Search (Binary Search for optimized compression ratio)
         // Search up to 98% quality to ensure maximum crispness without unnecessary degradation
@@ -445,15 +454,20 @@ object ImageProcessor {
         return result
     }
 
-    suspend fun convertToMultiPagePdf(imageFiles: List<File>, outputFile: File, targetSizeKb: Int): File? = withContext(Dispatchers.IO) {
+    suspend fun convertToMultiPagePdf(
+        imageFiles: List<File>,
+        outputFile: File,
+        targetSizeKb: Int,
+        autoEnhance: Boolean = true
+    ): File? = withContext(Dispatchers.IO) {
         if (imageFiles.isEmpty()) return@withContext null
         val targetSizeBytes = targetSizeKb * 1024
 
-        // Pre-enhance each page once upfront outside the binary search scale loop
+        // Pre-enhance each page once upfront outside the binary search scale loop (if autoEnhance is enabled)
         val preparedBitmaps = mutableListOf<Bitmap>()
         for (imageFile in imageFiles) {
             val bmp = BitmapFactory.decodeFile(imageFile.absolutePath) ?: continue
-            val enhanced = applySmartTextEnhancement(bmp)
+            val enhanced = if (autoEnhance) applySmartTextEnhancement(bmp) else bmp
             if (enhanced != bmp) bmp.recycle()
             val configBmp = enhanced.copy(Bitmap.Config.RGB_565, false) ?: enhanced
             if (configBmp != enhanced) enhanced.recycle()
@@ -536,13 +550,22 @@ object ImageProcessor {
         }
     }
 
-    suspend fun convertToPdf(imageFile: File, outputFile: File, targetSizeKb: Int): File? = withContext(Dispatchers.IO) {
+    suspend fun convertToPdf(
+        imageFile: File,
+        outputFile: File,
+        targetSizeKb: Int,
+        autoEnhance: Boolean = true
+    ): File? = withContext(Dispatchers.IO) {
         var originalBitmap = BitmapFactory.decodeFile(imageFile.absolutePath) ?: return@withContext null
         val targetSizeBytes = targetSizeKb * 1024
         
-        val enhancedBmp = applySmartTextEnhancement(originalBitmap)
-        originalBitmap.recycle()
-        originalBitmap = enhancedBmp
+        if (autoEnhance) {
+            val enhancedBmp = applySmartTextEnhancement(originalBitmap)
+            if (enhancedBmp != originalBitmap) {
+                originalBitmap.recycle()
+                originalBitmap = enhancedBmp
+            }
+        }
 
         // Convert to RGB_565 to save memory and PDF bytes significantly, allowing a higher resolution for the same file size
         val configBmp = originalBitmap.copy(Bitmap.Config.RGB_565, false)
