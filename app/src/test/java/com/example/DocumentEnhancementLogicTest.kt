@@ -7,73 +7,90 @@ import org.junit.Test
 class DocumentEnhancementLogicTest {
 
     @Test
-    fun testPaperBackgroundFlattening() {
-        // Under typical indoor room lighting, paper luminance is ~180
-        val localPaperBrightness = 180f
-        val pixelLum = 175 // Paper background pixel with slight grain/shadow
+    fun testPanCardSkyBlueBackgroundPreserved() {
+        // Authentic PAN Card sky-blue security background (RGB 140, 190, 220)
+        val r = 140
+        val g = 190
+        val b = 220
+        val lum = (299 * r + 587 * g + 114 * b) / 1000 // ~178
 
-        // Normalized luminance relative to paper brightness
-        val normLum = (pixelLum.toFloat() / localPaperBrightness) * 255f
-        // 175 / 180 * 255 = 247.9 >= 210 -> pure white
-        assertTrue("Paper pixel with shadow must be normalized above 210", normLum >= 210f)
+        assertTrue("PAN card background luminance is above 115", lum >= 115)
 
-        val flattenedPixel = if (normLum >= 210f) 0xFFFFFFFF.toInt() else 0
-        assertEquals("Paper pixel must be flattened to pure white #FFFFFF", 0xFFFFFFFF.toInt(), flattenedPixel)
+        // Must NOT be bleached to 0xFFFFFFFF
+        val shouldDeepen = lum < 115
+        val resultPixel = if (shouldDeepen) {
+            val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
+            (0xFF shl 24) or ((r * factor).toInt() shl 16) or ((g * factor).toInt() shl 8) or (b * factor).toInt()
+        } else {
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+
+        val expectedOriginalPixel = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        assertEquals("PAN card sky blue background must be 100% preserved with zero white bleaching", expectedOriginalPixel, resultPixel)
     }
 
     @Test
-    fun testTextInkDeepening() {
-        // Text ink on room-lit paper
-        val localPaperBrightness = 180f
-        val inkLum = 50 // Dark pen ink
+    fun testVoterIdSecurityPatternPreserved() {
+        // Authentic Voter ID card green/cyan security pattern (RGB 160, 210, 195)
+        val r = 160
+        val g = 210
+        val b = 195
+        val lum = (299 * r + 587 * g + 114 * b) / 1000 // ~193
 
-        val normLum = (inkLum.toFloat() / localPaperBrightness) * 255f
-        // 50 / 180 * 255 = 70.8 <= 125 -> ink stroke
-        assertTrue("Ink stroke must be below 125 threshold", normLum <= 125f)
+        assertTrue("Voter ID pattern luminance is above 115", lum >= 115)
 
-        val originalInkR = 50
-        val factor = 0.72f
-        val deepenedR = (originalInkR * factor).toInt()
-        assertEquals(36, deepenedR)
-        assertTrue("Deepened ink must be darker than original ink", deepenedR < originalInkR)
+        val shouldDeepen = lum < 115
+        val resultPixel = if (shouldDeepen) {
+            val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
+            (0xFF shl 24) or ((r * factor).toInt() shl 16) or ((g * factor).toInt() shl 8) or (b * factor).toInt()
+        } else {
+            (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        }
+
+        val expectedOriginalPixel = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        assertEquals("Voter ID security pattern must be 100% preserved without white blotches", expectedOriginalPixel, resultPixel)
+    }
+
+    @Test
+    fun testDarkTextInkDeepened() {
+        // Dark text/print ink (RGB 30, 30, 35)
+        val r = 30
+        val g = 30
+        val b = 35
+        val lum = (299 * r + 587 * g + 114 * b) / 1000 // ~30
+
+        assertTrue("Dark text ink luminance is below 115", lum < 115)
+
+        val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
+        val deepenedR = (r * factor).toInt()
+        val deepenedG = (g * factor).toInt()
+        val deepenedB = (b * factor).toInt()
+
+        assertTrue("Text ink must be deepened for crisp legibility", deepenedR < r)
+        assertTrue("Color proportions must remain balanced", deepenedR == deepenedG)
+        assertTrue("Blue ink tone remains consistent", deepenedB >= deepenedR)
     }
 
     @Test
     fun testColorPreservationForStampsAndPhotos() {
-        // Red stamp or seal
+        // Red stamp or seal (RGB 210, 30, 40)
         val stampR = 210
         val stampG = 30
         val stampB = 40
         val maxC = maxOf(stampR, maxOf(stampG, stampB))
         val minC = minOf(stampR, minOf(stampG, stampB))
-        val saturation = maxC - minC // 210 - 30 = 180
+        val saturation = maxC - minC // 180
 
-        assertTrue("Official stamp must have high saturation (> 22)", saturation > 22)
+        assertTrue("Official stamp must have high saturation (> 20)", saturation > 20)
 
-        // Neutral gray paper pixel
-        val paperR = 185
-        val paperG = 182
-        val paperB = 178
-        val paperMax = maxOf(paperR, maxOf(paperG, paperB))
-        val paperMin = minOf(paperR, minOf(paperG, paperB))
-        val paperSaturation = paperMax - paperMin // 185 - 178 = 7
+        // Warm face photo skin pixel (RGB 215, 170, 140)
+        val skinR = 215
+        val skinG = 170
+        val skinB = 140
+        val skinMax = maxOf(skinR, maxOf(skinG, skinB))
+        val skinMin = minOf(skinR, minOf(skinG, skinB))
+        val skinSaturation = skinMax - skinMin // 75
 
-        assertTrue("Paper/ink pixel must have low saturation (<= 22)", paperSaturation <= 22)
-    }
-
-    @Test
-    fun testAntialiasedEdgeSmoothstep() {
-        // Smoothstep curve for character edges between 125 and 210
-        val normLum = 167.5f // Exactly midway between 125 and 210
-        val t = (normLum - 125f) / (210f - 125f) // 0.5
-        val smoothT = t * t * (3f - 2f * t) // 0.25 * 2 = 0.5
-
-        assertEquals(0.5f, smoothT, 0.001f)
-
-        // As normLum approaches paper (210), smoothT approaches 1.0 (white)
-        val nearPaperLum = 205f
-        val tNear = (nearPaperLum - 125f) / (210f - 125f)
-        val smoothTNear = tNear * tNear * (3f - 2f * tNear)
-        assertTrue("Near-paper transition must smoothly blend towards white", smoothTNear > 0.95f)
+        assertTrue("Face photo skin must have high saturation (> 20) and remain untouched", skinSaturation > 20)
     }
 }

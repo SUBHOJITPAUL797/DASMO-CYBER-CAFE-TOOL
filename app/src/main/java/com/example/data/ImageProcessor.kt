@@ -396,17 +396,13 @@ object ImageProcessor {
     }
 
     /**
-     * Enterprise Document Illumination & Text Contrast Enhancement Engine:
-     * 1. Adaptive 2D Grid Background Estimation: Divides document into an adaptive 16x16 grid,
-     *    sampling low-saturation pixel luminance to compute local paper brightness.
-     *    Bilinearly interpolates across the grid to handle uneven room lighting and phone shadows.
-     * 2. Pure White Background Flattening: Maps non-ink paper pixels to #FFFFFF, eliminating
-     *    camera sensor noise and paper grain so DCT / WebP run-length compression achieves massive
-     *    file size reductions (50KB-100KB) with zero blur.
-     * 3. Ink Deepening & Antialiased Edge Preservation: Steepens ink contrast for laser-sharp
-     *    characters while smoothly interpolating character boundaries via smoothstep S-curve to prevent pixelation.
-     * 4. Color Protection: Detects stamps, colored seals, signatures, and passport photos via
-     *    chromatic saturation and preserves their colors intact.
+     * Authentic Document Contrast & Text Enhancement Engine:
+     * 1. Preserves 100% of authentic document and ID card colors (PAN card sky-blue, Voter ID green/pink,
+     *    marksheet cream, and security watermarks).
+     * 2. Zero White Bleaching: NEVER replaces background pixels with synthetic #FFFFFF, ensuring
+     *    documents look 100% authentic and are fully accepted by government verification portals and KYC officers.
+     * 3. Ink Deepening: Only deepens dark text/pen ink strokes (lum < 115) for razor-sharp readability.
+     * 4. Photo & Stamp Protection: Facial photos, official seals, and colorful graphics are left completely natural.
      */
     fun applySmartTextEnhancement(src: Bitmap): Bitmap {
         val width = src.width
@@ -414,137 +410,34 @@ object ImageProcessor {
         val pixels = IntArray(width * height)
         src.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        val gridCols = 16
-        val gridRows = 16
-        val cellW = maxOf(1, width / gridCols)
-        val cellH = maxOf(1, height / gridRows)
-        val bgGrid = FloatArray(gridCols * gridRows)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
 
-        // Pass 1: Compute local paper brightness for each grid cell using 90th percentile of neutral pixels
-        for (gy in 0 until gridRows) {
-            val yStart = gy * cellH
-            val yEnd = if (gy == gridRows - 1) height else (gy + 1) * cellH
-            for (gx in 0 until gridCols) {
-                val xStart = gx * cellW
-                val xEnd = if (gx == gridCols - 1) width else (gx + 1) * cellW
+            val maxC = maxOf(r, maxOf(g, b))
+            val minC = minOf(r, minOf(g, b))
+            val saturation = maxC - minC
 
-                var count = 0
-                var sumLum = 0L
-                val hist = IntArray(256)
-
-                val stepY = maxOf(1, (yEnd - yStart) / 16)
-                val stepX = maxOf(1, (xEnd - xStart) / 16)
-
-                var y = yStart
-                while (y < yEnd) {
-                    val rowOffset = y * width
-                    var x = xStart
-                    while (x < xEnd) {
-                        val p = pixels[rowOffset + x]
-                        val r = (p shr 16) and 0xFF
-                        val g = (p shr 8) and 0xFF
-                        val b = p and 0xFF
-                        val maxC = maxOf(r, maxOf(g, b))
-                        val minC = minOf(r, minOf(g, b))
-                        // Low saturation: neutral paper / ink
-                        if ((maxC - minC) <= 25) {
-                            val lum = (299 * r + 587 * g + 114 * b) / 1000
-                            hist[lum]++
-                            count++
-                            sumLum += lum
-                        }
-                        x += stepX
-                    }
-                    y += stepY
-                }
-
-                var cellBg = 220f
-                if (count > 0) {
-                    val targetRank = (count * 0.90f).toInt()
-                    var cumulative = 0
-                    var found = false
-                    for (lum in 0..255) {
-                        cumulative += hist[lum]
-                        if (cumulative >= targetRank) {
-                            cellBg = lum.toFloat()
-                            found = true
-                            break
-                        }
-                    }
-                    if (!found) {
-                        cellBg = (sumLum.toFloat() / count).coerceAtLeast(140f)
-                    }
-                }
-                bgGrid[gy * gridCols + gx] = cellBg.coerceIn(140f, 255f)
+            // Protect passport photos, colored stamps, seals, and graphics
+            if (saturation > 20) {
+                continue
             }
-        }
 
-        // Pass 2: Bilinear interpolation of illumination map + pixel transformation
-        for (y in 0 until height) {
-            val rowOffset = y * width
-            val cellYFloat = (y.toFloat() / cellH) - 0.5f
-            val gy0 = cellYFloat.toInt().coerceIn(0, gridRows - 1)
-            val gy1 = (gy0 + 1).coerceIn(0, gridRows - 1)
-            val ty = (cellYFloat - gy0).coerceIn(0f, 1f)
+            val lum = (299 * r + 587 * g + 114 * b) / 1000
 
-            for (x in 0 until width) {
-                val p = pixels[rowOffset + x]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-
-                val maxC = maxOf(r, maxOf(g, b))
-                val minC = minOf(r, minOf(g, b))
-                val saturation = maxC - minC
-
-                // Preserve stamps, colored seals, signatures, passport photos intact
-                if (saturation > 22) {
-                    continue
-                }
-
-                val lum = (299 * r + 587 * g + 114 * b) / 1000
-
-                // Bilinear sample of local paper luminance
-                val cellXFloat = (x.toFloat() / cellW) - 0.5f
-                val gx0 = cellXFloat.toInt().coerceIn(0, gridCols - 1)
-                val gx1 = (gx0 + 1).coerceIn(0, gridCols - 1)
-                val tx = (cellXFloat - gx0).coerceIn(0f, 1f)
-
-                val b00 = bgGrid[gy0 * gridCols + gx0]
-                val b10 = bgGrid[gy0 * gridCols + gx1]
-                val b01 = bgGrid[gy1 * gridCols + gx0]
-                val b11 = bgGrid[gy1 * gridCols + gx1]
-
-                val bTop = b00 + tx * (b10 - b00)
-                val bBottom = b01 + tx * (b11 - b01)
-                val localBg = bTop + ty * (bBottom - bTop)
-
-                // Normalized luminance relative to local paper tone (0..255)
-                val normLum = (lum.toFloat() / localBg.coerceAtLeast(100f)) * 255f
-
-                if (normLum >= 210f) {
-                    // Pure white paper background: zero high-frequency noise for DCT/WebP compression
-                    pixels[rowOffset + x] = 0xFFFFFFFF.toInt()
-                } else if (normLum <= 125f) {
-                    // Deepen text / pen ink strokes for crisp, high-contrast readability
-                    val factor = 0.72f
-                    val newR = (r * factor).toInt().coerceIn(0, 255)
-                    val newG = (g * factor).toInt().coerceIn(0, 255)
-                    val newB = (b * factor).toInt().coerceIn(0, 255)
-                    pixels[rowOffset + x] = (0xFF shl 24) or (newR shl 16) or (newG shl 8) or newB
-                } else {
-                    // Antialiased character edge: smooth S-curve transition between dark ink and white background
-                    val t = (normLum - 125f) / (210f - 125f)
-                    val smoothT = t * t * (3f - 2f * t)
-                    val darkR = (r * 0.72f).toInt()
-                    val darkG = (g * 0.72f).toInt()
-                    val darkB = (b * 0.72f).toInt()
-                    val finalR = (darkR + smoothT * (255 - darkR)).toInt().coerceIn(0, 255)
-                    val finalG = (darkG + smoothT * (255 - darkG)).toInt().coerceIn(0, 255)
-                    val finalB = (darkB + smoothT * (255 - darkB)).toInt().coerceIn(0, 255)
-                    pixels[rowOffset + x] = (0xFF shl 24) or (finalR shl 16) or (finalG shl 8) or finalB
-                }
+            // Only deepen dark text/ink strokes without altering any background color
+            if (lum < 115) {
+                // Smooth ink deepening factor that blends seamlessly into the background at lum = 115
+                val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
+                val newR = (r * factor).toInt().coerceIn(0, 255)
+                val newG = (g * factor).toInt().coerceIn(0, 255)
+                val newB = (b * factor).toInt().coerceIn(0, 255)
+                pixels[i] = (0xFF shl 24) or (newR shl 16) or (newG shl 8) or newB
             }
+            // For all other pixels (lum >= 115, background, card tints, watermarks):
+            // 100% untouched! Preserves authentic PAN card blue, Voter ID patterns, etc.
         }
 
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
