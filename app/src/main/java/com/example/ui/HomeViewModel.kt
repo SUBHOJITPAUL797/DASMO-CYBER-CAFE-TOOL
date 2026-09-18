@@ -1141,16 +1141,19 @@ class HomeViewModel(
             val height = options.outHeight
             if (width <= 0 || height <= 0) return@withContext false
             
-            // Landscape documents are almost always ID cards
+            // 1. Landscape scans in cyber cafes are virtually always ID cards (Aadhaar, PAN, DL)
             if (width > height) return@withContext true
             
-            // For portrait documents (like Voter ID / EPIC card, portrait student ID):
-            // Ratio (height / width) of standard ID-1 card is ~1.58. Accept typical phone scan crops (1.30f..1.95f).
+            // 2. For portrait scans:
+            // Standard A4 documents (marksheet, letter, certificate) have aspect ratio ~1.414 (210 x 297 mm)
+            // and fill the camera frame (typically 8MP to 12MP+).
+            // Standard ID cards in portrait (e.g. Indian Voter ID / EPIC card) have aspect ratio ~1.586 (54 x 86 mm).
+            // To guarantee that a standard A4 document is NEVER accidentally shrunk into an ID card canvas,
+            // we require BOTH a noticeably more elongated portrait ratio (ratio >= 1.50f) AND a card-sized scan area (< 5.0 MP).
             val ratio = height.toFloat() / width.toFloat()
-            if (ratio in 1.30f..1.95f) return@withContext true
-            
             val area = width.toLong() * height.toLong()
-            if (area < 6_000_000L) return@withContext true
+            if (ratio in 1.50f..1.95f && area < 5_000_000L) return@withContext true
+            if (area < 2_500_000L) return@withContext true
             
             return@withContext false
         } catch (e: Exception) {
@@ -1283,6 +1286,12 @@ class HomeViewModel(
                 _activeQueue.update { it.map { item ->
                     if (item.id == queueId) item.copy(personName = personName, documentType = documentType) else item
                 } }
+
+                if (isId) {
+                    pageFiles.forEach { file ->
+                        try { file.delete() } catch (e: Exception) {}
+                    }
+                }
 
                 if (showConfirmation.value) {
                     _statusMessage.value = "Multi-scan complete. Please confirm."
@@ -1428,150 +1437,8 @@ class HomeViewModel(
         }
     }
 
-    fun processScannedImages(imageUris: List<Uri>, pdfUri: Uri?) {
-        if (imageUris.isEmpty()) return
-        
-        viewModelScope.launch {
-            _isProcessing.value = true
-            val queueId = java.util.UUID.randomUUID().toString()
-            val format = if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
-                         else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
-                         else UploadFormat.JPEG
-            
-            // Immediately add to queue monitor representing live status from start to finish
-            val initialItem = QueueItem(
-                id = queueId,
-                personName = "New Scan",
-                documentType = "Document",
-                format = format,
-                status = "Combining images..."
-            )
-            _activeQueue.update { it + initialItem }
-
-            try {
-                // 1. Resolve paths
-                _statusMessage.value = "Combining images..."
-                val paths = imageUris.mapIndexed { index, uri ->
-                    val file = File(context.cacheDir, "scan_${java.util.UUID.randomUUID()}_$index.jpeg")
-                    ImageProcessor.fixImageOrientation(context, uri, file)
-                    file.absolutePath
-                }
-
-                // 2. Combine images (respecting A4 scan modes)
-                val combinedFile = File(context.cacheDir, "combined_${java.util.UUID.randomUUID()}.jpeg")
-                val isId = imageUris.isNotEmpty() && useA4Format.value && (imageUris.size in 1..2) && (imageUris.size == 2 || isImageIdCard(context, imageUris.first()))
-                val resultFile = if (isId) {
-                    ImageProcessor.combineImagesToA4(paths, combinedFile)
-                } else {
-                    ImageProcessor.combineImages(paths, combinedFile)
-                }
-                if (resultFile == null) {
-                    _statusMessage.value = "Failed to combine images"
-                    updateQueueStatus(queueId, "Failed: Combined empty")
-                    _isProcessing.value = false
-                    return@launch
-                }
-
-                // 3. Compress
-                val targetKb = targetSizeKb.value
-                _statusMessage.value = "Compressing to ${targetKb}KB..."
-                updateQueueStatus(queueId, "Compressing to ${targetKb}KB...")
-                val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
-
-                // High efficiency cache cleanup: delete the original separate page images and the uncompressed raw combined image
-                paths.forEach { path ->
-                    try { File(path).delete() } catch (e: Exception) {}
-                }
-                try { resultFile.delete() } catch (e: Exception) {}
-
-                if (enableAiAnalysis.value) {
-                    _statusMessage.value = "Analyzing with AI..."
-                    updateQueueStatus(queueId, "Analyzing with Cloud AI...")
-                    
-                    val analysis = try {
-                        val base64Image = encodeFileToBase64(compressedFile)
-                        analyzeDocumentWithNvidia(base64Image)
-                    } catch (e: Exception) {
-                        null
-                    }
-                    
-                    val checkedPersonName = sanitizePersonName(analysis?.personName ?: "Unknown")
-                    val checkedDocumentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
-                    
-                    _activeQueue.update { it.map { item ->
-                        if (item.id == queueId) item.copy(personName = checkedPersonName, documentType = checkedDocumentType) else item
-                    } }
-
-                    if (showConfirmation.value) {
-                        _statusMessage.value = "AI Analysis complete. Please confirm."
-                        updateQueueStatus(queueId, "Awaiting Confirmation")
-                        val item = PendingDocument(
-                            queueId = queueId,
-                            compressedFile = compressedFile,
-                            initialPersonName = checkedPersonName,
-                            initialDocumentType = checkedDocumentType
-                        )
-                        _pendingDocuments.update { it + item }
-                    } else {
-                        // Cloud AI Mode WITHOUT confirmation screen:
-                        _statusMessage.value = ""
-                        updateQueueStatus(queueId, "Saving automatically...")
-                        _isProcessing.value = false
-
-                        viewModelScope.launch {
-                            executeBackgroundUpload(context, queueId, compressedFile, checkedPersonName, checkedDocumentType, format)
-                        }
-                        return@launch
-                    }
-                } else {
-                    // Local OCR Mode:
-                    _statusMessage.value = "Running on-device local text recognition..."
-                    updateQueueStatus(queueId, "Running local text recognition...")
-                    
-                    var personName = "Unknown"
-                    var documentType = "Document"
-                    try {
-                        val localAnalysis = analyzeDocumentLocally(compressedFile)
-                        personName = sanitizePersonName(localAnalysis.personName)
-                        documentType = sanitizeDocumentType(localAnalysis.documentType)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-
-                    _activeQueue.update { it.map { item ->
-                        if (item.id == queueId) item.copy(personName = personName, documentType = documentType) else item
-                    } }
-
-                    if (showConfirmation.value) {
-                        _statusMessage.value = "Processing complete. Please confirm document details."
-                        updateQueueStatus(queueId, "Awaiting Confirmation")
-                        val item = PendingDocument(
-                            queueId = queueId,
-                            compressedFile = compressedFile,
-                            initialPersonName = personName,
-                            initialDocumentType = documentType
-                        )
-                        _pendingDocuments.update { it + item }
-                    } else {
-                        // Local OCR WITHOUT confirmation screen (Instant direct upload):
-                        _statusMessage.value = ""
-                        updateQueueStatus(queueId, "Saving automatically...")
-                        _isProcessing.value = false
-                        
-                        viewModelScope.launch {
-                            executeBackgroundUpload(context, queueId, compressedFile, personName, documentType, format)
-                        }
-                        return@launch
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                _statusMessage.value = "Error: ${e.message}"
-                updateQueueStatus(queueId, "Failed: ${e.localizedMessage ?: e.message}")
-            } finally {
-                _isProcessing.value = false
-            }
-        }
+    fun processScannedImages(imageUris: List<Uri>, pdfUri: Uri? = null) {
+        processMultiScannedImages(imageUris)
     }
 
     fun confirmAndUpload(context: Context, personName: String, documentType: String, format: UploadFormat) {

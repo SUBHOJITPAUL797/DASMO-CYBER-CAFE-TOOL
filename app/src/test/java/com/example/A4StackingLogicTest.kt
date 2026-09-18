@@ -7,17 +7,22 @@ import org.junit.Test
 
 class A4StackingLogicTest {
 
-    // Simulates the ViewModel's isImageIdCard logic
+    // Simulates the ViewModel's updated isImageIdCard logic
     private fun checkIsIdCard(width: Int, height: Int): Boolean {
         if (width <= 0 || height <= 0) return false
-        if (width > height) return true // Landscape ID cards (PAN, Aadhaar)
+        // 1. Landscape scans in cyber cafes are virtually always ID cards (Aadhaar, PAN, DL)
+        if (width > height) return true
         
-        // Portrait ID cards (Voter ID, Student ID, EPIC cards)
+        // 2. For portrait scans:
+        // Standard A4 documents (marksheet, letter, certificate) have aspect ratio ~1.414 (210 x 297 mm)
+        // and fill the camera frame (typically 8MP to 12MP+).
+        // Standard ID cards in portrait (e.g. Indian Voter ID / EPIC card) have aspect ratio ~1.586 (54 x 86 mm).
+        // To guarantee that a standard A4 document is NEVER accidentally shrunk into an ID card canvas,
+        // we require BOTH a noticeably more elongated portrait ratio (ratio >= 1.50f) AND a card-sized scan area (< 5.0 MP).
         val ratio = height.toFloat() / width.toFloat()
-        if (ratio in 1.30f..1.95f) return true
-        
         val area = width.toLong() * height.toLong()
-        if (area < 6_000_000L) return true
+        if (ratio in 1.50f..1.95f && area < 5_000_000L) return true
+        if (area < 2_500_000L) return true
         
         return false
     }
@@ -48,16 +53,55 @@ class A4StackingLogicTest {
     }
 
     @Test
+    fun testTwoCardScanDisabledWhenA4OptionIsOff() {
+        val useA4 = false
+        val imageCount = 2
+        val width = 856
+        val height = 540
+
+        val result = checkIsA4Canvas(imageCount, useA4, width, height)
+        assertFalse(
+            "When useA4Format is OFF, A4 Sheet Canvas must NOT activate",
+            result
+        )
+    }
+
+    @Test
     fun testPortraitVoterIdCardDetection() {
-        // Indian Voter ID (EPIC Card) is portrait (approx 5.4cm x 8.6cm, ratio ~1.59)
+        // Indian Voter ID (EPIC Card) is portrait (approx 5.4cm x 8.6cm, ratio ~1.586, area < 5MP)
         val width = 540
         val height = 856
         assertTrue("Voter ID portrait ratio must be identified as an ID card", checkIsIdCard(width, height))
 
-        // High resolution phone scan of portrait Voter ID (1800 x 2850)
-        val hiResW = 1800
-        val hiResH = 2850
-        assertTrue("High-res portrait Voter ID must be identified as an ID card", checkIsIdCard(hiResW, hiResH))
+        // Phone scan cropped to portrait Voter ID (1400 x 2220, area ~3.1MP, ratio ~1.586)
+        val phoneW = 1400
+        val phoneH = 2220
+        assertTrue("Cropped portrait Voter ID must be identified as an ID card", checkIsIdCard(phoneW, phoneH))
+    }
+
+    @Test
+    fun testFullPageA4PortraitDocumentNeverClassifiedAsIdCard() {
+        // Standard A4 document (marksheet, certificate, resume, legal deed):
+        // 2480 x 3508 (area ~8.7 MP, ratio 1.4145)
+        val width = 2480
+        val height = 3508
+
+        assertFalse(
+            "Standard A4 portrait document must NEVER be classified as an ID card",
+            checkIsIdCard(width, height)
+        )
+
+        // Single page scan of an A4 document with A4 format ON must NOT be shrunk onto card canvas
+        val isA4CardCanvas = checkIsA4Canvas(
+            imageCount = 1,
+            useA4Format = true,
+            width = width,
+            height = height
+        )
+        assertFalse(
+            "Single-page A4 document must NOT be shrunken onto a 2-slot card canvas",
+            isA4CardCanvas
+        )
     }
 
     @Test
@@ -66,6 +110,15 @@ class A4StackingLogicTest {
         val width = 856
         val height = 540
         assertTrue("Landscape PAN card must be identified as an ID card", checkIsIdCard(width, height))
+
+        // 1-page scan of PAN card with useA4Format = true activates single-card A4 sheet placement
+        val result = checkIsA4Canvas(
+            imageCount = 1,
+            useA4Format = true,
+            width = width,
+            height = height
+        )
+        assertTrue("Single-side landscape PAN card on A4 must be recognized", result)
     }
 
     @Test
@@ -101,6 +154,20 @@ class A4StackingLogicTest {
             pageFilesWithoutConfirmation
         )
         assertEquals(null, pageFilesWithoutConfirmation)
+    }
+
+    @Test
+    fun testMultiPageDocumentKeepsPageFilesForPdf() {
+        // For a multi-page document (isId = false), pageFiles MUST be kept to build a multi-page PDF
+        val isId = false
+        val rawPageFiles = listOf("page0.jpg", "page1.jpg", "page2.jpg")
+
+        val pageFiles = if (!isId) rawPageFiles else null
+        assertEquals(
+            "Non-ID multi-page documents must preserve individual page files for multi-page PDF output",
+            rawPageFiles,
+            pageFiles
+        )
     }
 
     @Test

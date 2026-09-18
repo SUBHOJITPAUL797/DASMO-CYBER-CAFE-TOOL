@@ -375,6 +375,7 @@ private suspend fun generatePassportJpeg(
         FileOutputStream(file).use { out ->
             outputBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
         }
+        outputBitmap.recycle()
         
         file
     } catch (e: Exception) {
