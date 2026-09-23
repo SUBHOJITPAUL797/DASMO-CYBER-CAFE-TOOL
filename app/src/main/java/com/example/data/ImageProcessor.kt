@@ -148,12 +148,17 @@ object ImageProcessor {
     suspend fun combineImages(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext null
         if (paths.size == 1) {
-            val bmp = decodeSampledBitmap(paths[0], 2400, 2400) // Use higher resolution for single image
-            if (bmp != null) {
-                saveBitmap(bmp, outputFile)
-                bmp.recycle()
+            try {
+                File(paths[0]).copyTo(outputFile, overwrite = true)
+                return@withContext outputFile
+            } catch (e: Exception) {
+                val bmp = decodeSampledBitmap(paths[0], 2400, 2400) // Fallback if copy fails
+                if (bmp != null) {
+                    saveBitmap(bmp, outputFile)
+                    bmp.recycle()
+                }
+                return@withContext outputFile
             }
-            return@withContext outputFile
         }
 
         // Higher resolution for professional quality
@@ -183,8 +188,12 @@ object ImageProcessor {
 
     suspend fun combineImagesToA4(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext null
+        if (paths.size < 2) {
+            // A single image must never be shrunken onto an A4 page with blank margins.
+            return@withContext combineImages(paths, outputFile)
+        }
         
-        // Standard A4 aspect ratio is 1:1.414. We use 1240 x 1754 (excellent balance of size & high scan document definition)
+        // Standard A4 aspect ratio is 1:1.414. We use 1654 x 2339 (excellent balance of size & high scan document definition)
         val a4Width = 1654
         val a4Height = 2339
         
@@ -198,28 +207,6 @@ object ImageProcessor {
             return@withContext null
         }
         val margin = 50f
-
-        if (bitmaps.size == 1) {
-            // Draw single image on the upper portion of the A4 page (cyber cafe single Xerox style)
-            val bmp = bitmaps[0]
-            val isPortraitCard = bmp.height > bmp.width
-            val maxAllowedWidth = if (isPortraitCard) a4Width * 0.42f else a4Width * 0.52f
-            val maxAllowedHeight = a4Height * 0.38f
-
-            val scale = kotlin.math.min(maxAllowedWidth / bmp.width.toFloat(), maxAllowedHeight / bmp.height.toFloat())
-            val drawWidth = (bmp.width * scale).toInt()
-            val drawHeight = (bmp.height * scale).toInt()
-
-            val left = (a4Width - drawWidth) / 2f
-            val top = 180f // Positioned naturally in upper portion of page
-
-            if (drawWidth > 0 && drawHeight > 0) {
-                val scaledBmp = Bitmap.createScaledBitmap(bmp, drawWidth, drawHeight, true)
-                canvas.drawBitmap(scaledBmp, left, top, null)
-                scaledBmp.recycle()
-            }
-            bmp.recycle()
-        } else {
             // Professional Cyber Cafe A4 ID Card Xerox Placement:
             // Front & Back are placed together in the UPPER HALF of the A4 page with uniform widths,
             // neatly centered horizontally, separated by a clean 1 cm (~80 px) gap.
@@ -276,7 +263,6 @@ object ImageProcessor {
                     bitmaps[i].recycle()
                 }
             }
-        }
 
         saveBitmap(a4Bitmap, outputFile)
         a4Bitmap.recycle()

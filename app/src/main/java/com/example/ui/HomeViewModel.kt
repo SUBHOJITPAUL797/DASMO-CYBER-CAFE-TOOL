@@ -1141,19 +1141,23 @@ class HomeViewModel(
             val height = options.outHeight
             if (width <= 0 || height <= 0) return@withContext false
             
-            // 1. Landscape scans in cyber cafes are virtually always ID cards (Aadhaar, PAN, DL)
-            if (width > height) return@withContext true
-            
-            // 2. For portrait scans:
-            // Standard A4 documents (marksheet, letter, certificate) have aspect ratio ~1.414 (210 x 297 mm)
-            // and fill the camera frame (typically 8MP to 12MP+).
-            // Standard ID cards in portrait (e.g. Indian Voter ID / EPIC card) have aspect ratio ~1.586 (54 x 86 mm).
-            // To guarantee that a standard A4 document is NEVER accidentally shrunk into an ID card canvas,
-            // we require BOTH a noticeably more elongated portrait ratio (ratio >= 1.50f) AND a card-sized scan area (< 5.0 MP).
-            val ratio = height.toFloat() / width.toFloat()
+            // Standard ID-1 card (Aadhaar, PAN, Voter ID, Driving License) has aspect ratio ~1.586 (85.6 x 54.0 mm).
+            // Standard A4 paper has aspect ratio ~1.414 (297 x 210 mm).
+            // A scanned ID card is small (typically < 6 MP), whereas a full A4 sheet scan is large (>= 6 MP).
             val area = width.toLong() * height.toLong()
-            if (ratio in 1.50f..1.95f && area < 5_000_000L) return@withContext true
-            if (area < 2_500_000L) return@withContext true
+            if (area > 6_000_000L) return@withContext false // Large document scans are never ID cards
+            
+            if (width > height) {
+                // Landscape ID card: ratio width / height
+                val ratio = width.toFloat() / height.toFloat()
+                if (ratio in 1.40f..2.0f) return@withContext true
+                if (area < 2_500_000L) return@withContext true
+            } else {
+                // Portrait ID card: ratio height / width
+                val ratio = height.toFloat() / width.toFloat()
+                if (ratio in 1.45f..2.0f && area < 5_000_000L) return@withContext true
+                if (area < 2_500_000L) return@withContext true
+            }
             
             return@withContext false
         } catch (e: Exception) {
@@ -1237,7 +1241,9 @@ class HomeViewModel(
                 _statusMessage.value = "Creating preview image..."
                 updateQueueStatus(queueId, "Creating preview image...")
                 val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
-                val isId = imageUris.isNotEmpty() && useA4Format.value && (imageUris.size in 1..2) && (imageUris.size == 2 || isImageIdCard(context, imageUris.first()))
+                // Single page scans are NEVER placed on an A4 canvas (exact crop preserved).
+                // A4 Sheet Canvas strictly applies to 2-card scans (Front & Back of ID card).
+                val isId = imageUris.size == 2 && useA4Format.value && (isImageIdCard(context, imageUris[0]) || isImageIdCard(context, imageUris[1]))
                 val resultFile = if (isId) {
                     ImageProcessor.combineImagesToA4(pageFiles.map { it.absolutePath }, combinedFile)
                 } else {
@@ -1377,7 +1383,9 @@ class HomeViewModel(
                     }
 
                     val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
-                    isId = newPageUris.isNotEmpty() && useA4Format.value && (newPageUris.size in 1..2) && (newPageUris.size == 2 || isImageIdCard(context, newPageUris.first()))
+                    // Single page scans are NEVER placed on an A4 canvas (exact crop preserved).
+                    // A4 Sheet Canvas strictly applies to 2-card scans (Front & Back of ID card).
+                    isId = newPageUris.size == 2 && useA4Format.value && (isImageIdCard(context, newPageUris[0]) || isImageIdCard(context, newPageUris[1]))
                     val resultFile = if (isId) {
                         ImageProcessor.combineImagesToA4(tempPageFiles.map { it.absolutePath }, combinedFile)
                     } else {
