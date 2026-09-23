@@ -78,16 +78,22 @@ object ImageProcessor {
                 else -> 0
             }
 
+            // KEY FIX: If no rotation is needed, do a raw byte copy.
+            // This is critical for ML Kit scanner URIs where the crop IS the URI content —
+            // decoding through BitmapFactory and re-encoding would read the full original photo
+            // instead of the cropped output, causing the full-page upload bug.
+            if (degrees == 0) {
+                return copyRaw(context, uri, outputFile)
+            }
+
             inputStream = context.contentResolver.openInputStream(uri)
             var bitmap = inputStream?.use { BitmapFactory.decodeStream(it) } ?: return copyRaw(context, uri, outputFile)
 
-            if (degrees != 0) {
-                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
-                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-                if (rotated != bitmap) {
-                    bitmap.recycle()
-                    bitmap = rotated
-                }
+            val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated != bitmap) {
+                bitmap.recycle()
+                bitmap = rotated
             }
 
             saveBitmap(bitmap, outputFile)
