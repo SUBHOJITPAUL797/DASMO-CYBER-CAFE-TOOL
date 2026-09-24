@@ -39,6 +39,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.io.ByteArrayOutputStream
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -79,7 +80,8 @@ enum class AuthState {
     NOT_LOGGED_IN,
     DEVICE_MISMATCH,
     PENDING_APPROVAL,
-    APPROVED
+    APPROVED,
+    EXPIRED
 }
 
 data class AppUser(
@@ -274,7 +276,7 @@ class HomeViewModel(
                     // 3. Expiration Check
                     if (rawExpiry > 0L && System.currentTimeMillis() > rawExpiry) {
                         addDbLog("PLAN EXPIRED: Subscription ended for $normalizedEmail.")
-                        _authState.value = AuthState.DEVICE_MISMATCH
+                        _authState.value = AuthState.EXPIRED
                         return@addSnapshotListener
                     }
 
@@ -1291,13 +1293,27 @@ class HomeViewModel(
                 var documentType = "Document"
                 
                 if (enableAiAnalysis.value) {
+                    var analyzed = false
                     try {
                         val base64Image = encodeFileToBase64(firstPageFile)
                         val analysis = analyzeDocumentWithNvidia(base64Image)
-                        personName = sanitizePersonName(analysis?.personName ?: "Unknown")
-                        documentType = sanitizeDocumentType(analysis?.documentType ?: "Document", "")
+                        if (analysis != null && analysis.personName.isNotBlank() && !analysis.personName.equals("Unknown", ignoreCase = true)) {
+                            personName = sanitizePersonName(analysis.personName)
+                            documentType = sanitizeDocumentType(analysis.documentType, "")
+                            analyzed = true
+                        }
                     } catch (e: Exception) {
                         e.printStackTrace()
+                    }
+                    // Seamless offline fallback to on-device ML Kit OCR if online analysis failed or returned Unknown
+                    if (!analyzed || personName.equals("Unknown", ignoreCase = true)) {
+                        try {
+                            val localAnalysis = analyzeDocumentLocally(firstPageFile)
+                            personName = sanitizePersonName(localAnalysis.personName)
+                            documentType = sanitizeDocumentType(localAnalysis.documentType)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
                 } else {
                     try {
@@ -1748,9 +1764,29 @@ class HomeViewModel(
                     ecop.printStackTrace()
                 }
             }
-            val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
 
-            // Insert or Update local DB
+            val safeLocalPdf = File(context.filesDir, finalPdfName)
+            var isPdfGenerated = false
+            if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                try {
+                    val pdfResult = if (pageFiles != null && pageFiles.isNotEmpty()) {
+                        ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
+                    } else {
+                        ImageProcessor.convertToPdf(safeLocalCopy, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
+                    }
+                    if (pdfResult != null && safeLocalPdf.exists()) {
+                        isPdfGenerated = true
+                        ImageProcessor.exportToPublicDocuments(context, safeLocalPdf, finalPdfName, "application/pdf")
+                    }
+                } catch (ep: Exception) {
+                    ep.printStackTrace()
+                }
+            }
+
+            val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
+            val primaryLocalFile = if ((format == UploadFormat.PDF || format == UploadFormat.BOTH) && safeLocalPdf.exists()) safeLocalPdf else safeLocalCopy
+
+            // Insert or Update local DB with the actual matching file path
             val insertId = try {
                 if (existingDocId != null) {
                     existingDocId.toLong()
@@ -1760,21 +1796,11 @@ class HomeViewModel(
                             fileName = dbFileName,
                             personName = checkedPersonName,
                             documentType = checkedDocumentType,
-                            localFilePath = safeLocalCopy.absolutePath,
+                            localFilePath = primaryLocalFile.absolutePath,
                             timestamp = System.currentTimeMillis(),
                             isUploaded = false,
                             drivePath = null
                         )
-                    )
-                    val newEntity = DocumentEntity(
-                        id = newId.toInt(),
-                        fileName = dbFileName,
-                        personName = checkedPersonName,
-                        documentType = checkedDocumentType,
-                        localFilePath = safeLocalCopy.absolutePath,
-                        timestamp = System.currentTimeMillis(),
-                        isUploaded = false,
-                        drivePath = null
                     )
                     incrementUserScannedCount()
                     newId
@@ -1799,7 +1825,6 @@ class HomeViewModel(
             var uploadSuccess = false
             var attempts = 0
             val maxAttempts = 3
-            var isPdfExported = false
 
             while (!uploadSuccess && attempts < maxAttempts) {
                 attempts++
@@ -1848,32 +1873,28 @@ class HomeViewModel(
                             }
 
                             if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                                updateQueueStatus(queueId, "Generating structured PDF...")
-                                val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
-                                try {
+                                if (!safeLocalPdf.exists()) {
+                                    updateQueueStatus(queueId, "Generating structured PDF...")
                                     if (pageFiles != null && pageFiles.isNotEmpty()) {
-                                        ImageProcessor.convertToMultiPagePdf(pageFiles, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
+                                        ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                                     } else {
-                                        ImageProcessor.convertToPdf(safeLocalCopy, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
+                                        ImageProcessor.convertToPdf(safeLocalCopy, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                                     }
-                                    if (!isPdfExported && pdfFile.exists()) {
-                                        ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
-                                        isPdfExported = true
+                                    if (safeLocalPdf.exists()) {
+                                        ImageProcessor.exportToPublicDocuments(context, safeLocalPdf, finalPdfName, "application/pdf")
                                     }
+                                }
 
-                                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                                    isPdfUploaded = retryIO(times = 3) {
-                                        GoogleDriveClient.uploadFile(
-                                            accessToken = token,
-                                            file = pdfFile,
-                                            mimeType = "application/pdf",
-                                            fileName = finalPdfName,
-                                            parentId = uploadParentId,
-                                            oldFileName = oldPdfName
-                                        )
-                                    }
-                                } finally {
-                                    try { pdfFile.delete() } catch (ed: Exception) {}
+                                updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                                isPdfUploaded = retryIO(times = 3) {
+                                    GoogleDriveClient.uploadFile(
+                                        accessToken = token,
+                                        file = safeLocalPdf,
+                                        mimeType = "application/pdf",
+                                        fileName = finalPdfName,
+                                        parentId = uploadParentId,
+                                        oldFileName = oldPdfName
+                                    )
                                 }
                             }
 
@@ -1928,7 +1949,7 @@ class HomeViewModel(
                                     fileName = dbFileName,
                                     personName = checkedPersonName,
                                     documentType = checkedDocumentType,
-                                    localFilePath = safeLocalCopy.absolutePath,
+                                    localFilePath = primaryLocalFile.absolutePath,
                                     timestamp = System.currentTimeMillis(),
                                     isUploaded = true,
                                     drivePath = builtDrivePath
@@ -2045,24 +2066,35 @@ class HomeViewModel(
                     format = UploadFormat.PDF
                 )}
                 
-                val imagePaths = selectedDocs.filter { 
-                    it.localFilePath.endsWith(".jpeg", ignoreCase = true) || it.localFilePath.endsWith(".jpg", ignoreCase = true)
-                }.map { it.localFilePath }
+                val tempDir = File(context.cacheDir, "merge_extract_${System.currentTimeMillis()}").apply { mkdirs() }
+                val filesToMerge = mutableListOf<File>()
+
+                for (doc in selectedDocs) {
+                    val file = File(doc.localFilePath)
+                    if (!file.exists()) continue
+                    if (file.name.endsWith(".pdf", ignoreCase = true) || doc.fileName.endsWith(".pdf", ignoreCase = true)) {
+                        val extracted = ImageProcessor.extractPagesFromPdf(context, file, tempDir)
+                        filesToMerge.addAll(extracted)
+                    } else {
+                        filesToMerge.add(file)
+                    }
+                }
                 
-                if (imagePaths.isEmpty()) {
-                    _statusMessage.value = "No images selected to merge."
+                if (filesToMerge.isEmpty()) {
+                    _statusMessage.value = "No valid documents selected to merge."
                     _isProcessing.value = false
-                    updateQueueStatus(queueId, "Failed: No images")
+                    updateQueueStatus(queueId, "Failed: No documents")
+                    try { tempDir.deleteRecursively() } catch (e: Exception) {}
                     return@launch
                 }
                 
-            val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
+                val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
                 val pdfFile = File(context.cacheDir, "merged_${java.util.UUID.randomUUID()}.pdf")
-                val filesToMerge = imagePaths.map { File(it) }
                 
                 updateQueueStatus(queueId, "Generating PDF...")
                 try {
                     val result = ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb, autoEnhance = autoEnhanceEnabled.value)
+                    try { tempDir.deleteRecursively() } catch (e: Exception) {}
                     if (result == null || !pdfFile.exists() || pdfFile.length() == 0L) {
                         _statusMessage.value = "Failed to create merged PDF (Try increasing target size)."
                         updateQueueStatus(queueId, "Failed: Generation error")
@@ -2222,7 +2254,11 @@ class HomeViewModel(
     }
 
     private suspend fun analyzeDocumentWithNvidia(base64Image: String): DocumentAnalysisResult? {
-        val apiKey = "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"
+        val apiKey = try {
+            com.example.BuildConfig::class.java.getField("NVIDIA_API_KEY").get(null) as? String
+        } catch (e: Exception) {
+            null
+        }?.takeIf { it.isNotBlank() } ?: "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"
         
         val prompt = """
             You are an elite, industrial-grade document scanner & OCR specialist.
@@ -2350,8 +2386,45 @@ class HomeViewModel(
     }
 
     private fun encodeFileToBase64(file: File): String {
-        val bytes = file.readBytes()
-        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+        return try {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, options)
+
+            var inSampleSize = 1
+            val reqSize = 1024
+            val maxDim = maxOf(options.outWidth, options.outHeight)
+            while (maxDim / (inSampleSize * 2) >= reqSize) {
+                inSampleSize *= 2
+            }
+
+            options.inJustDecodeBounds = false
+            options.inSampleSize = inSampleSize
+            var bmp = BitmapFactory.decodeFile(file.absolutePath, options)
+            if (bmp == null) {
+                val bytes = file.readBytes()
+                return Base64.encodeToString(bytes, Base64.NO_WRAP)
+            }
+
+            if (bmp.width > reqSize || bmp.height > reqSize) {
+                val scale = reqSize.toFloat() / maxOf(bmp.width, bmp.height)
+                val sw = (bmp.width * scale).toInt().coerceAtLeast(1)
+                val sh = (bmp.height * scale).toInt().coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(bmp, sw, sh, true)
+                if (scaled != bmp) {
+                    bmp.recycle()
+                    bmp = scaled
+                }
+            }
+
+            val stream = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 82, stream)
+            bmp.recycle()
+            Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            val bytes = file.readBytes()
+            Base64.encodeToString(bytes, Base64.NO_WRAP)
+        }
     }
 
     private suspend fun analyzeDocumentLocally(imageFile: File): DocumentAnalysisResult = withContext(Dispatchers.IO) {

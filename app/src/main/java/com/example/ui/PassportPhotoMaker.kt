@@ -281,37 +281,59 @@ private fun removeBackground(
     val image = InputImage.fromBitmap(bitmap, 0)
     segmenter.process(image)
         .addOnSuccessListener { segmentationMask ->
-            val mask = segmentationMask.buffer
-            val maskWidth = segmentationMask.width
-            val maskHeight = segmentationMask.height
+            try {
+                val mask = segmentationMask.buffer
+                val maskWidth = segmentationMask.width
+                val maskHeight = segmentationMask.height
 
-            val outputBitmap = Bitmap.createBitmap(maskWidth, maskHeight, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(outputBitmap)
-            canvas.drawColor(bgColor.toArgb())
-
-            // Resize original to match mask
-            val resizedOriginal = Bitmap.createScaledBitmap(bitmap, maskWidth, maskHeight, true)
-            
-            val pixels = IntArray(maskWidth * maskHeight)
-            resizedOriginal.getPixels(pixels, 0, maskWidth, 0, 0, maskWidth, maskHeight)
-
-            mask.rewind()
-            for (y in 0 until maskHeight) {
-                for (x in 0 until maskWidth) {
-                    val foregroundConfidence = mask.float
-                    if (foregroundConfidence > 0.5f) { // If it's likely foreground
-                        // Keep pixel
+                // 1. Build mask bitmap from confidence buffer
+                val maskBitmap = Bitmap.createBitmap(maskWidth, maskHeight, Bitmap.Config.ARGB_8888)
+                val maskPixels = IntArray(maskWidth * maskHeight)
+                mask.rewind()
+                for (i in 0 until (maskWidth * maskHeight)) {
+                    val confidence = mask.float
+                    val alpha = if (confidence > 0.5f) {
+                        ((confidence - 0.5f) * 2f * 255f).toInt().coerceIn(0, 255)
                     } else {
-                        // Make transparent/background
-                        pixels[y * maskWidth + x] = bgColor.toArgb()
+                        0
                     }
+                    maskPixels[i] = (alpha shl 24) or 0x00FFFFFF
                 }
+                maskBitmap.setPixels(maskPixels, 0, maskWidth, 0, 0, maskWidth, maskHeight)
+
+                // 2. Upscale mask to original photo dimensions for maximum crispness
+                val scaledMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
+                maskBitmap.recycle()
+
+                // 3. Cutout foreground with alpha
+                val fgBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                val fgCanvas = Canvas(fgBitmap)
+                fgCanvas.drawBitmap(bitmap, 0f, 0f, null)
+
+                val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
+                }
+                fgCanvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
+                scaledMask.recycle()
+
+                // 4. Composite high-resolution background color with crisp foreground person
+                val outputBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(outputBitmap)
+                canvas.drawColor(bgColor.toArgb())
+                canvas.drawBitmap(fgBitmap, 0f, 0f, null)
+                fgBitmap.recycle()
+
+                onComplete(outputBitmap)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                onComplete(null)
+            } finally {
+                try { segmenter.close() } catch (ex: Exception) {}
             }
-            outputBitmap.setPixels(pixels, 0, maskWidth, 0, 0, maskWidth, maskHeight)
-            onComplete(outputBitmap)
         }
         .addOnFailureListener {
             it.printStackTrace()
+            try { segmenter.close() } catch (ex: Exception) {}
             onComplete(null)
         }
 }

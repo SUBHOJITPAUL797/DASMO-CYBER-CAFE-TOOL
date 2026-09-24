@@ -216,6 +216,19 @@ fun MainScreen(
     }
     val googleSignInClient = remember { GoogleSignIn.getClient(context, gso) }
 
+    LaunchedEffect(Unit) {
+        val lastAccount = GoogleSignIn.getLastSignedInAccount(context)
+        if (lastAccount != null && !lastAccount.email.isNullOrBlank()) {
+            if (lastAccount.idToken != null && com.google.firebase.auth.FirebaseAuth.getInstance().currentUser == null) {
+                val credential = com.google.firebase.auth.GoogleAuthProvider.getCredential(lastAccount.idToken, null)
+                com.google.firebase.auth.FirebaseAuth.getInstance().signInWithCredential(credential)
+                    .addOnFailureListener { e ->
+                        android.util.Log.e("MainActivity", "Silent Firebase Auth sign-in failed", e)
+                    }
+            }
+        }
+    }
+
     val recoveryIntent by viewModel.recoveryIntent.collectAsStateWithLifecycle()
 
     val recoveryLauncher = rememberLauncherForActivityResult(

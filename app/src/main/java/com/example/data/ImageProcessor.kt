@@ -425,41 +425,53 @@ object ImageProcessor {
     fun applySmartTextEnhancement(src: Bitmap): Bitmap {
         val width = src.width
         val height = src.height
-        val pixels = IntArray(width * height)
-        src.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-
-            val maxC = maxOf(r, maxOf(g, b))
-            val minC = minOf(r, minOf(g, b))
-            val saturation = maxC - minC
-
-            // Protect passport photos, colored stamps, seals, and graphics
-            if (saturation > 20) {
-                continue
-            }
-
-            val lum = (299 * r + 587 * g + 114 * b) / 1000
-
-            // Only deepen dark text/ink strokes without altering any background color
-            if (lum < 115) {
-                // Smooth ink deepening factor that blends seamlessly into the background at lum = 115
-                val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
-                val newR = (r * factor).toInt().coerceIn(0, 255)
-                val newG = (g * factor).toInt().coerceIn(0, 255)
-                val newB = (b * factor).toInt().coerceIn(0, 255)
-                pixels[i] = (0xFF shl 24) or (newR shl 16) or (newG shl 8) or newB
-            }
-            // For all other pixels (lum >= 115, background, card tints, watermarks):
-            // 100% untouched! Preserves authentic PAN card blue, Voter ID patterns, etc.
+        // Downscale massive camera images (e.g. 12MP-24MP) before pixel enhancement to bound memory
+        val maxDim = 2400
+        val workingBitmap = if (width > maxDim || height > maxDim) {
+            val scale = maxDim.toFloat() / maxOf(width, height)
+            val sw = (width * scale).toInt()
+            val sh = (height * scale).toInt()
+            Bitmap.createScaledBitmap(src, sw, sh, true)
+        } else {
+            src
         }
 
-        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        result.setPixels(pixels, 0, width, 0, 0, width, height)
+        val w = workingBitmap.width
+        val h = workingBitmap.height
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+
+        // Process row by row with a single row buffer instead of allocating a 48MB array at once!
+        val rowPixels = IntArray(w)
+        for (y in 0 until h) {
+            workingBitmap.getPixels(rowPixels, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val p = rowPixels[x]
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+
+                val maxC = maxOf(r, maxOf(g, b))
+                val minC = minOf(r, minOf(g, b))
+                val saturation = maxC - minC
+
+                if (saturation <= 20) {
+                    val lum = (299 * r + 587 * g + 114 * b) / 1000
+                    if (lum < 115) {
+                        val factor = 0.82f + 0.18f * (lum.toFloat() / 115f)
+                        val newR = (r * factor).toInt().coerceIn(0, 255)
+                        val newG = (g * factor).toInt().coerceIn(0, 255)
+                        val newB = (b * factor).toInt().coerceIn(0, 255)
+                        rowPixels[x] = (0xFF shl 24) or (newR shl 16) or (newG shl 8) or newB
+                    }
+                }
+            }
+            result.setPixels(rowPixels, 0, w, 0, y, w, 1)
+        }
+
+        if (workingBitmap != src) {
+            workingBitmap.recycle()
+        }
         return result
     }
 
@@ -472,35 +484,52 @@ object ImageProcessor {
         if (imageFiles.isEmpty()) return@withContext null
         val targetSizeBytes = targetSizeKb * 1024
 
-        // Pre-enhance each page once upfront outside the binary search scale loop (if autoEnhance is enabled)
-        val preparedBitmaps = mutableListOf<Bitmap>()
-        for (imageFile in imageFiles) {
-            val bmp = BitmapFactory.decodeFile(imageFile.absolutePath) ?: continue
-            val enhanced = if (autoEnhance) applySmartTextEnhancement(bmp) else bmp
-            if (enhanced != bmp) bmp.recycle()
-            val configBmp = enhanced.copy(Bitmap.Config.RGB_565, false) ?: enhanced
-            if (configBmp != enhanced) enhanced.recycle()
-            preparedBitmaps.add(configBmp)
-        }
-        if (preparedBitmaps.isEmpty()) return@withContext null
+        // 1. Pre-process and optimize each page sequentially to disk to keep RAM usage bounded to ONE page at a time
+        val tempDir = File(outputFile.parentFile ?: File("."), "temp_pdf_pages_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+        val processedPageFiles = mutableListOf<File>()
 
         try {
-            var bestStream = ByteArrayOutputStream()
-            var bestScale = 0f
-            var lowScale = 0.1f
-            var highScale = 1.0f
+            for ((idx, imageFile) in imageFiles.withIndex()) {
+                val bmp = decodeSampledBitmap(imageFile.absolutePath, 1654, 2339) ?: continue
+                val enhanced = if (autoEnhance) applySmartTextEnhancement(bmp) else bmp
+                if (enhanced != bmp) bmp.recycle()
 
+                val tempPageFile = File(tempDir, "page_$idx.jpg")
+                FileOutputStream(tempPageFile).use { fos ->
+                    enhanced.compress(Bitmap.CompressFormat.JPEG, 90, fos)
+                }
+                enhanced.recycle()
+                processedPageFiles.add(tempPageFile)
+            }
+
+            if (processedPageFiles.isEmpty()) return@withContext null
+
+            // 2. Binary search for scale to achieve target size
+            var bestStream: ByteArrayOutputStream? = null
+            var smallestStream: ByteArrayOutputStream? = null
+            var smallestSize = Long.MAX_VALUE
+            var lowScale = 0.15f
+            var highScale = 1.0f
             var iterations = 0
-            while (lowScale <= highScale && iterations < 20) {
+
+            while (lowScale <= highScale && iterations < 15) {
                 iterations++
                 val midScale = (lowScale + highScale) / 2
                 val document = PdfDocument()
                 var canProcess = true
 
-                for ((index, pageBmp) in preparedBitmaps.withIndex()) {
+                for ((index, pageFile) in processedPageFiles.withIndex()) {
+                    val pageBmp = BitmapFactory.decodeFile(pageFile.absolutePath)
+                    if (pageBmp == null) {
+                        canProcess = false
+                        break
+                    }
+
                     val width = (pageBmp.width * midScale).toInt()
                     val height = (pageBmp.height * midScale).toInt()
                     if (width <= 0 || height <= 0) {
+                        pageBmp.recycle()
                         canProcess = false
                         break
                     }
@@ -519,11 +548,12 @@ object ImageProcessor {
 
                     val destRect = android.graphics.RectF(0f, 0f, pdfWidth.toFloat(), pdfHeight.toFloat())
                     page.canvas.drawBitmap(scaledBitmap, null, destRect, null)
-
                     document.finishPage(page)
+
                     if (scaledBitmap != pageBmp) {
                         scaledBitmap.recycle()
                     }
+                    pageBmp.recycle()
                 }
 
                 if (!canProcess) {
@@ -535,27 +565,32 @@ object ImageProcessor {
                 document.writeTo(tempStream)
                 document.close()
 
-                val size = tempStream.size()
+                val size = tempStream.size().toLong()
+                if (size < smallestSize) {
+                    smallestSize = size
+                    smallestStream = tempStream
+                }
+
                 if (size <= targetSizeBytes) {
                     bestStream = tempStream
-                    bestScale = midScale
-                    lowScale = midScale + 0.005f
+                    lowScale = midScale + 0.05f
                 } else {
-                    highScale = midScale - 0.005f
+                    highScale = midScale - 0.05f
                 }
             }
 
-            if (bestStream.size() > 0) {
-                // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
+            // Fallback to smallestStream if no iteration strictly reached <= targetSizeBytes
+            val finalStream = bestStream ?: smallestStream
+            if (finalStream != null && finalStream.size() > 0) {
                 FileOutputStream(outputFile).use { fos ->
-                    fos.write(bestStream.toByteArray())
+                    fos.write(finalStream.toByteArray())
                 }
                 return@withContext outputFile
             }
 
             return@withContext null
         } finally {
-            preparedBitmaps.forEach { it.recycle() }
+            try { tempDir.deleteRecursively() } catch (e: Exception) {}
         }
     }
 
@@ -576,20 +611,20 @@ object ImageProcessor {
             }
         }
 
-        // Convert to RGB_565 to save memory and PDF bytes significantly, allowing a higher resolution for the same file size
         val configBmp = originalBitmap.copy(Bitmap.Config.RGB_565, false)
         if (configBmp != null && configBmp != originalBitmap) {
             originalBitmap.recycle()
             originalBitmap = configBmp
         }
 
-        var bestStream = ByteArrayOutputStream()
-        var bestScale = 0f
+        var bestStream: ByteArrayOutputStream? = null
+        var smallestStream: ByteArrayOutputStream? = null
+        var smallestSize = Long.MAX_VALUE
         var lowScale = 0.1f
         var highScale = 1.0f
-        
         var iterations = 0
-        while (lowScale <= highScale && iterations < 20) {
+        
+        while (lowScale <= highScale && iterations < 15) {
             iterations++
             val midScale = (lowScale + highScale) / 2
             
@@ -624,27 +659,68 @@ object ImageProcessor {
                 scaledBitmap.recycle()
             }
             
-            val size = tempStream.size()
+            val size = tempStream.size().toLong()
+            if (size < smallestSize) {
+                smallestSize = size
+                smallestStream = tempStream
+            }
+
             if (size <= targetSizeBytes) {
                 bestStream = tempStream
-                bestScale = midScale
-                lowScale = midScale + 0.005f
+                lowScale = midScale + 0.05f
             } else {
-                highScale = midScale - 0.005f
+                highScale = midScale - 0.05f
             }
         }
         
         originalBitmap.recycle()
 
-        if (bestStream.size() > 0) {
-            // BUG FIX: use{} ensures stream is ALWAYS closed even if write() throws
+        val finalStream = bestStream ?: smallestStream
+        if (finalStream != null && finalStream.size() > 0) {
             FileOutputStream(outputFile).use { fos ->
-                fos.write(bestStream.toByteArray())
+                fos.write(finalStream.toByteArray())
             }
             return@withContext outputFile
         }
         
         return@withContext null
+    }
+
+    fun extractPagesFromPdf(context: Context, pdfFile: File, tempDir: File): List<File> {
+        val extractedFiles = mutableListOf<File>()
+        try {
+            val fileDescriptor = android.os.ParcelFileDescriptor.open(pdfFile, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = android.graphics.pdf.PdfRenderer(fileDescriptor)
+            try {
+                for (i in 0 until renderer.pageCount) {
+                    val page = renderer.openPage(i)
+                    try {
+                        val renderScale = 2.0f
+                        val width = (page.width * renderScale).toInt().coerceIn(600, 2480)
+                        val height = (page.height * renderScale).toInt().coerceIn(800, 3508)
+                        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        val canvas = Canvas(bitmap)
+                        canvas.drawColor(0xFFFFFFFF.toInt())
+                        page.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+
+                        val pageFile = File(tempDir, "pdf_extracted_${System.currentTimeMillis()}_$i.jpeg")
+                        FileOutputStream(pageFile).use { fos ->
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos)
+                        }
+                        bitmap.recycle()
+                        extractedFiles.add(pageFile)
+                    } finally {
+                        page.close()
+                    }
+                }
+            } finally {
+                renderer.close()
+                fileDescriptor.close()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return extractedFiles
     }
 
     fun exportToPublicDocuments(context: Context, sourceFile: File, fileName: String, mimeType: String): Boolean {

@@ -39,35 +39,41 @@ object GoogleDriveClient {
         val folders = mutableListOf<GoogleDriveFolder>()
         val effectiveParentId = if (parentId.isEmpty()) "root" else parentId
         val q = "'$effectiveParentId' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=files(id,name)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
-        
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .addHeader("Authorization", "Bearer $accessToken")
-            .build()
+        var pageToken: String? = null
 
-        client.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: ""
-                val json = JSONObject(body)
-                val filesArray = json.optJSONArray("files")
-                if (filesArray != null) {
-                    for (i in 0 until filesArray.length()) {
-                        val item = filesArray.getJSONObject(i)
-                        folders.add(
-                            GoogleDriveFolder(
-                                id = item.optString("id", ""),
-                                name = item.optString("name", "")
+        do {
+            val pageTokenParam = if (pageToken != null) "&pageToken=${java.net.URLEncoder.encode(pageToken, "UTF-8")}" else ""
+            val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=nextPageToken,files(id,name)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true$pageTokenParam"
+            
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("Authorization", "Bearer $accessToken")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val json = JSONObject(body)
+                    pageToken = json.optString("nextPageToken", "").takeIf { it.isNotBlank() }
+                    val filesArray = json.optJSONArray("files")
+                    if (filesArray != null) {
+                        for (i in 0 until filesArray.length()) {
+                            val item = filesArray.getJSONObject(i)
+                            folders.add(
+                                GoogleDriveFolder(
+                                    id = item.optString("id", ""),
+                                    name = item.optString("name", "")
+                                )
                             )
-                        )
+                        }
                     }
+                } else {
+                    val errBody = response.body?.string() ?: ""
+                    throw Exception("Google Drive API Error (${response.code}): $errBody")
                 }
-            } else {
-                val errBody = response.body?.string() ?: ""
-                throw Exception("Google Drive API Error (${response.code}): $errBody")
             }
-        }
+        } while (pageToken != null)
         folders
     }
 
@@ -238,42 +244,48 @@ object GoogleDriveClient {
     suspend fun listFiles(accessToken: String, folderId: String): List<DriveFile> = withContext(Dispatchers.IO) {
         val filesList = mutableListOf<DriveFile>()
         val q = "'$folderId' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false"
-        // Request fields we care about, including createdTime and webViewLink for detailed presentation
-        val fields = "files(id,name,mimeType,size,createdTime,webViewLink)"
-        val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=${java.net.URLEncoder.encode(fields, "UTF-8")}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true"
-        
-        val request = Request.Builder()
-            .url(url)
-            .get()
-            .addHeader("Authorization", "Bearer $accessToken")
-            .build()
+        val fields = "nextPageToken,files(id,name,mimeType,size,createdTime,webViewLink)"
+        var pageToken: String? = null
 
-        client.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: ""
-                val json = JSONObject(body)
-                val filesArray = json.optJSONArray("files")
-                if (filesArray != null) {
-                    for (i in 0 until filesArray.length()) {
-                        val item = filesArray.getJSONObject(i)
-                        filesList.add(
-                            DriveFile(
-                                id = item.optString("id", ""),
-                                name = item.optString("name", "Unnamed File"),
-                                mimeType = item.optString("mimeType", ""),
-                                size = item.optLong("size", 0L),
-                                createdTime = if (item.has("createdTime")) item.getString("createdTime") else null,
-                                webViewLink = if (item.has("webViewLink")) item.getString("webViewLink") else null,
-                                folderId = folderId
+        do {
+            val pageTokenParam = if (pageToken != null) "&pageToken=${java.net.URLEncoder.encode(pageToken, "UTF-8")}" else ""
+            val url = "https://www.googleapis.com/drive/v3/files?q=${java.net.URLEncoder.encode(q, "UTF-8")}&fields=${java.net.URLEncoder.encode(fields, "UTF-8")}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true$pageTokenParam"
+            
+            val request = Request.Builder()
+                .url(url)
+                .get()
+                .addHeader("Authorization", "Bearer $accessToken")
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    val json = JSONObject(body)
+                    pageToken = json.optString("nextPageToken", "").takeIf { it.isNotBlank() }
+                    val filesArray = json.optJSONArray("files")
+                    if (filesArray != null) {
+                        for (i in 0 until filesArray.length()) {
+                            val item = filesArray.getJSONObject(i)
+                            filesList.add(
+                                DriveFile(
+                                    id = item.optString("id", ""),
+                                    name = item.optString("name", "Unnamed File"),
+                                    mimeType = item.optString("mimeType", ""),
+                                    size = item.optLong("size", 0L),
+                                    createdTime = if (item.has("createdTime")) item.getString("createdTime") else null,
+                                    webViewLink = if (item.has("webViewLink")) item.getString("webViewLink") else null,
+                                    folderId = folderId
+                                )
                             )
-                        )
+                        }
                     }
+                } else {
+                    val errBody = response.body?.string() ?: ""
+                    android.util.Log.e("GoogleDriveClient", "listFiles Error: $errBody")
+                    pageToken = null
                 }
-            } else {
-                val errBody = response.body?.string() ?: ""
-                android.util.Log.e("GoogleDriveClient", "listFiles Error: $errBody")
             }
-        }
+        } while (pageToken != null)
         filesList
     }
 }
