@@ -205,22 +205,25 @@ object ImageProcessor {
             return@withContext combineImages(paths, outputFile)
         }
         
-        // Standard A4 aspect ratio is 1:1.414. We use 1654 x 2339 (excellent balance of size & high scan document definition)
-        val a4Width = 1654
-        val a4Height = 2339
-        
-        val a4Bitmap = Bitmap.createBitmap(a4Width, a4Height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(a4Bitmap)
-        canvas.drawColor(0xFFFFFFFF.toInt()) // crisp white paper background
+        var a4Bitmap: Bitmap? = null
+        var bitmaps: List<Bitmap> = emptyList()
+        try {
+            // Standard A4 aspect ratio is 1:1.414. We use 1654 x 2339 (excellent balance of size & high scan document definition)
+            val a4Width = 1654
+            val a4Height = 2339
+            
+            a4Bitmap = Bitmap.createBitmap(a4Width, a4Height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(a4Bitmap)
+            canvas.drawColor(0xFFFFFFFF.toInt()) // crisp white paper background
 
-        val bitmaps = paths.mapNotNull { decodeSampledBitmap(it, a4Width, a4Height) }
-        if (bitmaps.size < 2) {
-            bitmaps.forEach { it.recycle() }
-            a4Bitmap.recycle()
-            // Fallback to regular combine if one of the images failed decoding
-            return@withContext combineImages(paths, outputFile)
-        }
-        val margin = 50f
+            bitmaps = paths.mapNotNull { decodeSampledBitmap(it, a4Width, a4Height) }
+            if (bitmaps.size < 2) {
+                bitmaps.forEach { if (!it.isRecycled) it.recycle() }
+                a4Bitmap.recycle()
+                // Fallback to regular combine if one of the images failed decoding
+                return@withContext combineImages(paths, outputFile)
+            }
+            val margin = 50f
             // Professional Cyber Cafe A4 ID Card Xerox Placement:
             // Front & Back are placed together in the UPPER HALF of the A4 page with uniform widths,
             // neatly centered horizontally, separated by a clean 1 cm (~80 px) gap.
@@ -274,13 +277,19 @@ object ImageProcessor {
             // If extra unused bitmaps were loaded, recycle them too
             if (bitmaps.size > 2) {
                 for (i in 2 until bitmaps.size) {
-                    bitmaps[i].recycle()
+                    if (!bitmaps[i].isRecycled) bitmaps[i].recycle()
                 }
             }
 
-        saveBitmap(a4Bitmap, outputFile)
-        a4Bitmap.recycle()
-        outputFile
+            saveBitmap(a4Bitmap, outputFile)
+            a4Bitmap.recycle()
+            outputFile
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            bitmaps.forEach { if (!it.isRecycled) it.recycle() }
+            if (a4Bitmap != null && !a4Bitmap.isRecycled) a4Bitmap.recycle()
+            combineImages(paths, outputFile)
+        }
     }
 
     private fun saveBitmap(bitmap: Bitmap, file: File, format: String = "JPEG") {
