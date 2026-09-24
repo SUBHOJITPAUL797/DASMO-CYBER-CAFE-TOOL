@@ -3280,7 +3280,9 @@ fun MainScreen(
                                     accumulatedPageUris.clear()
                                     editDocIdForScan = null
                                 } else {
-                                    viewModel.processMultiScannedImages(accumulatedPageUris.toList())
+                                    val uris = accumulatedPageUris.toList()
+                                    val overrideFormat = if (uris.size > 1) UploadFormat.PDF else null
+                                    viewModel.processMultiScannedImages(uris, overrideFormat)
                                     accumulatedPageUris.clear()
                                 }
                             },

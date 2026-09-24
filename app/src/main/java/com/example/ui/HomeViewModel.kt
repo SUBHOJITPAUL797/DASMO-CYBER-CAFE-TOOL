@@ -137,6 +137,7 @@ class HomeViewModel(
     val autoEnhanceEnabled = settingsRepository.autoEnhanceEnabled
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
 
+    private val ADMIN_SECURITY_KEY = "DASMO_ADMIN_SEC_26042004_SUBHOJIT_CYBER_KEY"
     private val firestore = FirebaseFirestore.getInstance()
     private var authListenerRegistration: ListenerRegistration? = null
     private var usersListenerRegistration: ListenerRegistration? = null
@@ -399,7 +400,8 @@ class HomeViewModel(
             "isApproved", newApproved,
             "dasmo_isApproved", newApproved,
             "status", newStatus,
-            "dasmo_status", newStatus
+            "dasmo_status", newStatus,
+            "adminKey", ADMIN_SECURITY_KEY
         )
     }
 
@@ -413,7 +415,8 @@ class HomeViewModel(
             "isApproved", true,
             "dasmo_isApproved", true,
             "status", "approved",
-            "dasmo_status", "approved"
+            "dasmo_status", "approved",
+            "adminKey", ADMIN_SECURITY_KEY
         ).addOnSuccessListener {
             _statusMessage.value = "User $email approved successfully!"
         }.addOnFailureListener { e ->
@@ -431,7 +434,8 @@ class HomeViewModel(
             "isApproved", false,
             "dasmo_isApproved", false,
             "status", "rejected",
-            "dasmo_status", "rejected"
+            "dasmo_status", "rejected",
+            "adminKey", ADMIN_SECURITY_KEY
         ).addOnSuccessListener {
             _statusMessage.value = "User $email access revoked."
         }
@@ -455,7 +459,8 @@ class HomeViewModel(
                 "dasmo_isApproved" to false,
                 "status" to "pending",
                 "dasmo_status" to "pending",
-                "currentSessionToken" to ""
+                "currentSessionToken" to "",
+                "adminKey" to ADMIN_SECURITY_KEY
             )
         ).addOnSuccessListener {
             _statusMessage.value = "Device lock reset for $email. User can now bind a new device."
@@ -468,10 +473,14 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update("expiryTimestamp", expiryTimestamp)
-            .addOnSuccessListener {
-                _statusMessage.value = "Updated access plan duration for $email."
-            }
+        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
+            mapOf(
+                "expiryTimestamp" to expiryTimestamp,
+                "adminKey" to ADMIN_SECURITY_KEY
+            )
+        ).addOnSuccessListener {
+            _statusMessage.value = "Updated access plan duration for $email."
+        }
     }
 
     fun deleteUser(email: String) {
@@ -480,9 +489,12 @@ class HomeViewModel(
             _statusMessage.value = "Unauthorized action!"
             return
         }
-        firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).delete()
-            .addOnSuccessListener {
-                _statusMessage.value = "Deleted user $email from database."
+        val docRef = firestore.collection("dasmo_scanner_users").document(email.trim().lowercase())
+        docRef.update("status", "deleted", "adminKey", ADMIN_SECURITY_KEY)
+            .addOnCompleteListener {
+                docRef.delete().addOnSuccessListener {
+                    _statusMessage.value = "Deleted user $email from database."
+                }
             }
     }
 
@@ -509,7 +521,8 @@ class HomeViewModel(
             "registrationTimestamp" to System.currentTimeMillis(),
             "lastActiveTimestamp" to System.currentTimeMillis(),
             "totalScannedCount" to 0L,
-            "appTag" to "admin_preapproved"
+            "appTag" to "admin_preapproved",
+            "adminKey" to ADMIN_SECURITY_KEY
         )
         firestore.collection("dasmo_scanner_users").document(trimmed).set(doc, com.google.firebase.firestore.SetOptions.merge())
             .addOnSuccessListener {
@@ -1186,7 +1199,7 @@ class HomeViewModel(
                     _batchVerificationGroups.value = groupedUris
                 } else {
                     for (group in groupedUris) {
-                        processScannedImages(group.uris, null)
+                        processMultiScannedImagesInternal(group.uris)
                     }
                 }
             } catch (e: Exception) {
@@ -1202,8 +1215,10 @@ class HomeViewModel(
 
     fun confirmBatchVerification(groups: List<BatchGroup>) {
         _batchVerificationGroups.value = null
-        for (group in groups) {
-            processScannedImages(group.uris, null)
+        viewModelScope.launch {
+            for (group in groups) {
+                processMultiScannedImagesInternal(group.uris)
+            }
         }
     }
 
@@ -1211,15 +1226,20 @@ class HomeViewModel(
         _batchVerificationGroups.value = newGroups
     }
 
-    fun processMultiScannedImages(imageUris: List<Uri>) {
+    fun processMultiScannedImages(imageUris: List<Uri>, overrideFormat: UploadFormat? = null) {
         if (imageUris.isEmpty()) return
-        
         viewModelScope.launch {
-            _isProcessing.value = true
-            val queueId = java.util.UUID.randomUUID().toString()
-            val format = if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
-                         else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
-                         else UploadFormat.JPEG
+            processMultiScannedImagesInternal(imageUris, overrideFormat)
+        }
+    }
+
+    private suspend fun processMultiScannedImagesInternal(imageUris: List<Uri>, overrideFormat: UploadFormat? = null) {
+        if (imageUris.isEmpty()) return
+        _isProcessing.value = true
+        val queueId = java.util.UUID.randomUUID().toString()
+        val format = overrideFormat ?: if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
+                     else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
+                     else UploadFormat.JPEG
             
             val initialItem = QueueItem(
                 id = queueId,
@@ -1254,7 +1274,7 @@ class HomeViewModel(
                     _statusMessage.value = "Failed to combine images"
                     updateQueueStatus(queueId, "Failed: Combined empty")
                     _isProcessing.value = false
-                    return@launch
+                    return
                 }
 
                 val targetKb = targetSizeKb.value
@@ -1334,7 +1354,6 @@ class HomeViewModel(
                 updateQueueStatus(queueId, "Failed: ${e.message}")
             }
         }
-    }
 
     fun updateAndUploadDocument(
         context: Context,
@@ -1780,6 +1799,7 @@ class HomeViewModel(
             var uploadSuccess = false
             var attempts = 0
             val maxAttempts = 3
+            var isPdfExported = false
 
             while (!uploadSuccess && attempts < maxAttempts) {
                 attempts++
@@ -1836,7 +1856,10 @@ class HomeViewModel(
                                     } else {
                                         ImageProcessor.convertToPdf(safeLocalCopy, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
                                     }
-                                    ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
+                                    if (!isPdfExported && pdfFile.exists()) {
+                                        ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
+                                        isPdfExported = true
+                                    }
 
                                     updateQueueStatus(queueId, "Uploading PDF to Drive...")
                                     isPdfUploaded = retryIO(times = 3) {
@@ -2039,7 +2062,12 @@ class HomeViewModel(
                 
                 updateQueueStatus(queueId, "Generating PDF...")
                 try {
-                    ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb, autoEnhance = autoEnhanceEnabled.value)
+                    val result = ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb, autoEnhance = autoEnhanceEnabled.value)
+                    if (result == null || !pdfFile.exists() || pdfFile.length() == 0L) {
+                        _statusMessage.value = "Failed to create merged PDF (Try increasing target size)."
+                        updateQueueStatus(queueId, "Failed: Generation error")
+                        return@launch
+                    }
                     
                     val safeLocalCopy = File(context.filesDir, "merged_${java.util.UUID.randomUUID()}.pdf")
                     pdfFile.inputStream().use { input ->
@@ -2066,12 +2094,16 @@ class HomeViewModel(
                         }
                     }
                     
+                    val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
+                    val builtDrivePath = if (isUploaded) "My Drive/$driveFolderNameStr" else null
+
                     val mergedEntity = DocumentEntity(
                         fileName = finalFileName,
                         personName = "Merged",
                         documentType = "PDF",
                         localFilePath = safeLocalCopy.absolutePath,
                         isUploaded = isUploaded,
+                        drivePath = builtDrivePath,
                         timestamp = System.currentTimeMillis()
                     )
                     val id = database.documentDao().insertDocument(mergedEntity)

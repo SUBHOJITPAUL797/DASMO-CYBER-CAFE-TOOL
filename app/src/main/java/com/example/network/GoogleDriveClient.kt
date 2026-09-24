@@ -262,8 +262,8 @@ object GoogleDriveClient {
                                 name = item.optString("name", "Unnamed File"),
                                 mimeType = item.optString("mimeType", ""),
                                 size = item.optLong("size", 0L),
-                                createdTime = item.optString("createdTime", null),
-                                webViewLink = item.optString("webViewLink", null),
+                                createdTime = if (item.has("createdTime")) item.getString("createdTime") else null,
+                                webViewLink = if (item.has("webViewLink")) item.getString("webViewLink") else null,
                                 folderId = folderId
                             )
                         )

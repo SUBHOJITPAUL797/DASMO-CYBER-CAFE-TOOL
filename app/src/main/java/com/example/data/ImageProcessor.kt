@@ -99,7 +99,7 @@ object ImageProcessor {
             saveBitmap(bitmap, outputFile)
             bitmap.recycle()
             return outputFile
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
             return copyRaw(context, uri, outputFile)
         }
@@ -171,25 +171,31 @@ object ImageProcessor {
         val bitmaps = paths.mapNotNull { decodeSampledBitmap(it, 2000, 2000) }
         if (bitmaps.isEmpty()) return@withContext null
 
-        val margin = 40
-        val maxWidth = bitmaps.maxOf { it.width } + (margin * 2)
-        val totalHeight = bitmaps.sumOf { it.height } + (margin * (bitmaps.size + 1))
+        try {
+            val margin = 40
+            val maxWidth = bitmaps.maxOf { it.width } + (margin * 2)
+            val totalHeight = bitmaps.sumOf { it.height } + (margin * (bitmaps.size + 1))
 
-        val combinedBitmap = Bitmap.createBitmap(maxWidth, totalHeight, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(combinedBitmap)
-        canvas.drawColor(0xFFFFFFFF.toInt()) // Crisp white background
-        
-        var currentHeight = margin.toFloat()
-        for (bitmap in bitmaps) {
-            val left = (maxWidth - bitmap.width) / 2f
-            canvas.drawBitmap(bitmap, left, currentHeight, null)
-            currentHeight += bitmap.height + margin
-            bitmap.recycle() // Release original individual bitmap immediately
+            val combinedBitmap = Bitmap.createBitmap(maxWidth, totalHeight, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(combinedBitmap)
+            canvas.drawColor(0xFFFFFFFF.toInt()) // Crisp white background
+            
+            var currentHeight = margin.toFloat()
+            for (bitmap in bitmaps) {
+                val left = (maxWidth - bitmap.width) / 2f
+                canvas.drawBitmap(bitmap, left, currentHeight, null)
+                currentHeight += bitmap.height + margin
+                bitmap.recycle() // Release original individual bitmap immediately
+            }
+
+            saveBitmap(combinedBitmap, outputFile)
+            combinedBitmap.recycle() // Release combined bitmap canvas source
+            outputFile
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            bitmaps.forEach { if (!it.isRecycled) it.recycle() }
+            null
         }
-
-        saveBitmap(combinedBitmap, outputFile)
-        combinedBitmap.recycle() // Release combined bitmap canvas source
-        outputFile
     }
 
     suspend fun combineImagesToA4(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
@@ -208,9 +214,11 @@ object ImageProcessor {
         canvas.drawColor(0xFFFFFFFF.toInt()) // crisp white paper background
 
         val bitmaps = paths.mapNotNull { decodeSampledBitmap(it, a4Width, a4Height) }
-        if (bitmaps.isEmpty()) {
+        if (bitmaps.size < 2) {
+            bitmaps.forEach { it.recycle() }
             a4Bitmap.recycle()
-            return@withContext null
+            // Fallback to regular combine if one of the images failed decoding
+            return@withContext combineImages(paths, outputFile)
         }
         val margin = 50f
             // Professional Cyber Cafe A4 ID Card Xerox Placement:
@@ -653,7 +661,7 @@ object ImageProcessor {
                 }
             } else {
                 @Suppress("DEPRECATION")
-                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "dasmo scanner")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS), "Dasmo Scan")
                 if (!dir.exists()) {
                     dir.mkdirs()
                 }
