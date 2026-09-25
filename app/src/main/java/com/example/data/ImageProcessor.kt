@@ -116,25 +116,21 @@ object ImageProcessor {
                 else -> 0
             }
 
+            if (degrees == 0) return file
+
             var bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return file
 
-            var modified = false
-            if (degrees != 0) {
-                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
-                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-                if (rotated != bitmap) {
-                    bitmap.recycle()
-                    bitmap = rotated
-                }
-                modified = true
+            val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated != bitmap) {
+                bitmap.recycle()
+                bitmap = rotated
             }
 
-            if (modified) {
-                saveBitmap(bitmap, file)
-            }
+            saveBitmap(bitmap, file)
             bitmap.recycle()
             return file
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             e.printStackTrace()
             return file
         }
@@ -173,18 +169,30 @@ object ImageProcessor {
 
         try {
             val margin = 40
-            val maxWidth = bitmaps.maxOf { it.width } + (margin * 2)
-            val totalHeight = bitmaps.sumOf { it.height } + (margin * (bitmaps.size + 1))
+            val rawMaxWidth = bitmaps.maxOf { it.width } + (margin * 2)
+            val rawTotalHeight = bitmaps.sumOf { it.height } + (margin * (bitmaps.size + 1))
 
-            val combinedBitmap = Bitmap.createBitmap(maxWidth, totalHeight, Bitmap.Config.ARGB_8888)
+            // Bound dimensions to maximum 2400 x 3500 (safe high-res document canvas) to prevent OOM / Canvas crash
+            val maxCanvasWidth = 2400
+            val maxCanvasHeight = 3500
+            val scale = minOf(1.0f, maxCanvasWidth.toFloat() / rawMaxWidth.toFloat(), maxCanvasHeight.toFloat() / rawTotalHeight.toFloat())
+
+            val finalWidth = (rawMaxWidth * scale).toInt().coerceAtLeast(1)
+            val finalHeight = (rawTotalHeight * scale).toInt().coerceAtLeast(1)
+            val scaledMargin = (margin * scale).coerceAtLeast(4f)
+
+            val combinedBitmap = Bitmap.createBitmap(finalWidth, finalHeight, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(combinedBitmap)
             canvas.drawColor(0xFFFFFFFF.toInt()) // Crisp white background
             
-            var currentHeight = margin.toFloat()
+            var currentHeight = scaledMargin
             for (bitmap in bitmaps) {
-                val left = (maxWidth - bitmap.width) / 2f
-                canvas.drawBitmap(bitmap, left, currentHeight, null)
-                currentHeight += bitmap.height + margin
+                val targetBmpW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val targetBmpH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+                val left = (finalWidth - targetBmpW) / 2f
+                val destRect = android.graphics.RectF(left, currentHeight, left + targetBmpW, currentHeight + targetBmpH)
+                canvas.drawBitmap(bitmap, null, destRect, null)
+                currentHeight += targetBmpH + scaledMargin
                 bitmap.recycle() // Release original individual bitmap immediately
             }
 
@@ -315,7 +323,9 @@ object ImageProcessor {
         format: String = "JPEG",
         autoEnhance: Boolean = true
     ): File = withContext(Dispatchers.IO) {
-        var bmp = BitmapFactory.decodeFile(file.absolutePath) ?: throw Exception("Failed to decode image file structure")
+        val maxTargetDimension = if (targetSizeKb >= 1000) 3200 else 2400
+        var bmp = decodeSampledBitmap(file.absolutePath, maxTargetDimension, maxTargetDimension) 
+            ?: throw Exception("Failed to decode image file structure")
         val targetSizeBytes = targetSizeKb * 1024
 
         val compressFormat = if (format == "WEBP") {
@@ -330,9 +340,6 @@ object ImageProcessor {
         }
 
         // 1. Smart Resolution Optimization
-        // Massive camera images (e.g. 4000px+) suffer severe low-quality degradation to fit under small KB targets.
-        // For large target size (>=1000KB), keep up to 3200px; otherwise 2400px preserves 1080p textual sharpness.
-        val maxTargetDimension = if (targetSizeKb >= 1000) 3200 else 2400
         if (bmp.width > maxTargetDimension || bmp.height > maxTargetDimension) {
             val scale = maxTargetDimension.toFloat() / kotlin.math.max(bmp.width, bmp.height)
             val scaledW = (bmp.width * scale).toInt()

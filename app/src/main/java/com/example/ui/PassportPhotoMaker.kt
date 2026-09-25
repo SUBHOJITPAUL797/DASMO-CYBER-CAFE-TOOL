@@ -70,9 +70,7 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
     ) { uri: Uri? ->
         selectedImageUri = uri
         uri?.let {
-            val bitmap = context.contentResolver.openInputStream(it)?.use { stream ->
-                BitmapFactory.decodeStream(stream)
-            }
+            val bitmap = decodeSampledBitmapFromUri(context, it, 2048)
             originalBitmap = bitmap
             processedBitmap = null
             cropScale = 1f
@@ -401,6 +399,42 @@ private suspend fun generatePassportJpeg(
         
         file
     } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+private fun decodeSampledBitmapFromUri(context: Context, uri: Uri, maxDimension: Int = 2048): Bitmap? {
+    return try {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, options)
+        }
+
+        var inSampleSize = 1
+        val maxDim = maxOf(options.outWidth, options.outHeight)
+        while (maxDim / (inSampleSize * 2) >= maxDimension) {
+            inSampleSize *= 2
+        }
+
+        options.inJustDecodeBounds = false
+        options.inSampleSize = inSampleSize
+        var bmp = context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, options)
+        } ?: return null
+
+        if (bmp.width > maxDimension || bmp.height > maxDimension) {
+            val scale = maxDimension.toFloat() / maxOf(bmp.width, bmp.height)
+            val sw = (bmp.width * scale).toInt().coerceAtLeast(1)
+            val sh = (bmp.height * scale).toInt().coerceAtLeast(1)
+            val scaled = Bitmap.createScaledBitmap(bmp, sw, sh, true)
+            if (scaled != bmp) {
+                bmp.recycle()
+                bmp = scaled
+            }
+        }
+        bmp
+    } catch (e: Throwable) {
         e.printStackTrace()
         null
     }

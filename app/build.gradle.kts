@@ -16,8 +16,8 @@ android {
     applicationId = "tools.subhojit.dasmo"
     minSdk = 24
     targetSdk = 36
-    versionCode = 28
-    versionName = "1.2.7"
+    versionCode = 29
+    versionName = "1.2.8"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
