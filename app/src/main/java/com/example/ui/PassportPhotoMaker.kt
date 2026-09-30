@@ -62,6 +62,7 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
     var originalBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
@@ -228,9 +229,15 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                 ) {
                     val colors = listOf(Color.Blue, Color.White, Color.Red, Color.LightGray)
                     colors.forEach { color ->
+                        val isSelected = selectedColor == color
                         Box(
                             modifier = Modifier
                                 .size(48.dp)
+                                .background(
+                                    if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(10.dp)
+                                )
+                                .padding(if (isSelected) 3.dp else 0.dp)
                                 .background(color, shape = RoundedCornerShape(8.dp))
                                 .clickable { selectedColor = color }
                         )
@@ -240,26 +247,34 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                 Spacer(modifier = Modifier.height(32.dp))
                 
                 Button(
-                    onClick = { 
-                        scope.launch {
-                            val bmpToUse = processedBitmap ?: originalBitmap
-                            if (bmpToUse != null) {
-                                val jpgFile = generatePassportJpeg(
-                                    context, bmpToUse, selectedDimension, selectedColor,
-                                    cropScale, cropOffsetX, cropOffsetY
-                                )
-                                if (jpgFile != null) {
-                                    ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
-                                    Toast.makeText(context, "Saved to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
-                                } else {
-                                    Toast.makeText(context, "Failed to save", Toast.LENGTH_SHORT).show()
+                    onClick = {
+                        if (!isSaving) {
+                            scope.launch {
+                                isSaving = true
+                                try {
+                                    val bmpToUse = processedBitmap ?: originalBitmap
+                                    if (bmpToUse != null) {
+                                        val jpgFile = generatePassportJpeg(
+                                            context, bmpToUse, selectedDimension, selectedColor,
+                                            cropScale, cropOffsetX, cropOffsetY
+                                        )
+                                        if (jpgFile != null) {
+                                            ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
+                                            Toast.makeText(context, "Saved to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            Toast.makeText(context, "Failed to save", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } finally {
+                                    isSaving = false
                                 }
                             }
                         }
                     },
+                    enabled = !isSaving,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Save as JPEG")
+                    Text(if (isSaving) "Saving..." else "Save as JPEG")
                 }
             }
         }

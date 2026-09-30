@@ -1151,41 +1151,6 @@ class HomeViewModel(
         }
     }
 
-    private suspend fun isImageIdCard(context: Context, uri: Uri): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val options = android.graphics.BitmapFactory.Options()
-            options.inJustDecodeBounds = true
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                android.graphics.BitmapFactory.decodeStream(input, null, options)
-            }
-            val width = options.outWidth
-            val height = options.outHeight
-            if (width <= 0 || height <= 0) return@withContext false
-            
-            // Standard ID-1 card (Aadhaar, PAN, Voter ID, Driving License) has aspect ratio ~1.586 (85.6 x 54.0 mm).
-            // Standard A4 paper has aspect ratio ~1.414 (297 x 210 mm).
-            // A scanned ID card is small (typically < 6 MP), whereas a full A4 sheet scan is large (>= 6 MP).
-            val area = width.toLong() * height.toLong()
-            if (area > 6_000_000L) return@withContext false // Large document scans are never ID cards
-            
-            if (width > height) {
-                // Landscape ID card: ratio width / height
-                val ratio = width.toFloat() / height.toFloat()
-                if (ratio in 1.40f..2.0f) return@withContext true
-                if (area < 2_500_000L) return@withContext true
-            } else {
-                // Portrait ID card: ratio height / width
-                val ratio = height.toFloat() / width.toFloat()
-                if (ratio in 1.45f..2.0f && area < 5_000_000L) return@withContext true
-                if (area < 2_500_000L) return@withContext true
-            }
-            
-            return@withContext false
-        } catch (e: Exception) {
-            false
-        }
-    }
-
     fun processBatchScannedImages(imageUris: List<Uri>, customPagesPerDoc: Int? = null) {
         if (imageUris.isEmpty()) return
         lastBatchScannedUris = imageUris
