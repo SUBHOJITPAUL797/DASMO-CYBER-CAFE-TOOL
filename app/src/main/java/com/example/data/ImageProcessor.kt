@@ -149,6 +149,7 @@ object ImageProcessor {
 
     suspend fun combineImages(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext null
+        outputFile.parentFile?.mkdirs()
         if (paths.size == 1) {
             try {
                 File(paths[0]).copyTo(outputFile, overwrite = true)
@@ -245,6 +246,7 @@ object ImageProcessor {
 
     suspend fun combineImagesToA4(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext null
+        outputFile.parentFile?.mkdirs()
         if (paths.size < 2) {
             // A single image must never be shrunken onto an A4 page with blank margins.
             return@withContext combineImages(paths, outputFile)
@@ -711,6 +713,7 @@ object ImageProcessor {
 
         val finalStream = bestStream ?: smallestStream
         if (finalStream != null && finalStream.size() > 0) {
+            outputFile.parentFile?.mkdirs()
             FileOutputStream(outputFile).use { fos ->
                 fos.write(finalStream.toByteArray())
             }
@@ -723,6 +726,7 @@ object ImageProcessor {
     fun extractPagesFromPdf(context: Context, pdfFile: File, tempDir: File): List<File> {
         val extractedFiles = mutableListOf<File>()
         try {
+            if (!tempDir.exists()) tempDir.mkdirs()
             val fileDescriptor = android.os.ParcelFileDescriptor.open(pdfFile, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
             val renderer = android.graphics.pdf.PdfRenderer(fileDescriptor)
             try {
@@ -769,12 +773,17 @@ object ImageProcessor {
                 val collection = MediaStore.Files.getContentUri("external")
                 val uri = resolver.insert(collection, contentValues)
                 if (uri != null) {
-                    resolver.openOutputStream(uri)?.use { outputStream ->
-                        sourceFile.inputStream().use { inputStream ->
-                            inputStream.copyTo(outputStream)
+                    try {
+                        resolver.openOutputStream(uri)?.use { outputStream ->
+                            sourceFile.inputStream().use { inputStream ->
+                                inputStream.copyTo(outputStream)
+                            }
                         }
+                        true
+                    } catch (t: Throwable) {
+                        try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                        false
                     }
-                    true
                 } else {
                     false
                 }

@@ -4,9 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.pdf.PdfDocument
+import android.media.ExifInterface
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -437,6 +439,29 @@ private fun decodeSampledBitmapFromUri(context: Context, uri: Uri, maxDimension:
         var bmp = context.contentResolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(stream, null, options)
         } ?: return null
+
+        // Fix EXIF orientation so vertical portrait selfies from phone cameras don't display rotated 90°
+        try {
+            val exif = context.contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
+            val orientation = exif?.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                ?: ExifInterface.ORIENTATION_NORMAL
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+            if (degrees != 0) {
+                val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                if (rotated != bmp) {
+                    bmp.recycle()
+                    bmp = rotated
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         if (bmp.width > maxDimension || bmp.height > maxDimension) {
             val scale = maxDimension.toFloat() / maxOf(bmp.width, bmp.height)

@@ -274,6 +274,30 @@ fun InAppUpdateDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                val startDownload: () -> Unit = {
+                    downloadState = ScannerUpdateDownloadState.DOWNLOADING
+                    scope.launch {
+                        val result = UpdateChecker.downloadApk(
+                            context = context,
+                            downloadUrl = updateInfo.downloadUrl,
+                            onProgress = { p, dMb, tMb ->
+                                progress = p
+                                downloadedMb = dMb
+                                totalMb = if (tMb > 0) tMb else totalMb
+                            }
+                        )
+                        result.onSuccess { apkFile ->
+                            downloadedApkFile = apkFile
+                            downloadState = ScannerUpdateDownloadState.DOWNLOADED
+                            // Automatically trigger package installer!
+                            UpdateChecker.installApk(context, apkFile)
+                        }.onFailure { err ->
+                            errorMessage = err.localizedMessage ?: "Unknown error"
+                            downloadState = ScannerUpdateDownloadState.ERROR
+                        }
+                    }
+                }
+
                 // Action Buttons
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -292,29 +316,7 @@ fun InAppUpdateDialog(
                     when (downloadState) {
                         ScannerUpdateDownloadState.IDLE -> {
                             Button(
-                                onClick = {
-                                    downloadState = ScannerUpdateDownloadState.DOWNLOADING
-                                    scope.launch {
-                                        val result = UpdateChecker.downloadApk(
-                                            context = context,
-                                            downloadUrl = updateInfo.downloadUrl,
-                                            onProgress = { p, dMb, tMb ->
-                                                progress = p
-                                                downloadedMb = dMb
-                                                totalMb = if (tMb > 0) tMb else totalMb
-                                            }
-                                        )
-                                        result.onSuccess { apkFile ->
-                                            downloadedApkFile = apkFile
-                                            downloadState = ScannerUpdateDownloadState.DOWNLOADED
-                                            // Automatically trigger package installer!
-                                            UpdateChecker.installApk(context, apkFile)
-                                        }.onFailure { err ->
-                                            errorMessage = err.localizedMessage ?: "Unknown error"
-                                            downloadState = ScannerUpdateDownloadState.ERROR
-                                        }
-                                    }
-                                },
+                                onClick = startDownload,
                                 modifier = Modifier.weight(1.5f),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
@@ -361,19 +363,28 @@ fun InAppUpdateDialog(
                             }
                         }
                         ScannerUpdateDownloadState.ERROR -> {
-                            Button(
+                            OutlinedButton(
                                 onClick = {
                                     UpdateChecker.openUrl(context, updateInfo.downloadUrl)
                                 },
-                                modifier = Modifier.weight(1.5f),
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Browser", maxLines = 1)
+                            }
+                            Button(
+                                onClick = startDownload,
+                                modifier = Modifier.weight(1.2f),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.error
+                                    containerColor = MaterialTheme.colorScheme.primary
                                 )
                             ) {
-                                Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Open in Browser")
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Retry", fontWeight = FontWeight.Bold)
                             }
                         }
                     }

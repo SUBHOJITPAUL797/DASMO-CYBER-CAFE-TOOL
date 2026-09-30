@@ -309,12 +309,10 @@ fun BatchCameraScanScreen(
             // Close Button
             IconButton(
                 onClick = {
-                    if (capturedPageUris.isNotEmpty()) {
-                        // Dismiss warning
-                        onDismiss()
-                    } else {
-                        onDismiss()
+                    capturedPageFiles.forEach { file ->
+                        try { file.delete() } catch (_: Exception) {}
                     }
+                    onDismiss()
                 },
                 modifier = Modifier
                     .size(44.dp)
