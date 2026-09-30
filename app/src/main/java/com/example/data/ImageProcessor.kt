@@ -154,7 +154,7 @@ object ImageProcessor {
                 File(paths[0]).copyTo(outputFile, overwrite = true)
                 return@withContext outputFile
             } catch (e: Exception) {
-                val bmp = decodeSampledBitmap(paths[0], 2400, 2400) // Fallback if copy fails
+                val bmp = decodeSampledBitmap(paths[0], 2400, 2400)
                 if (bmp != null) {
                     saveBitmap(bmp, outputFile)
                     bmp.recycle()
@@ -163,16 +163,53 @@ object ImageProcessor {
             }
         }
 
-        // Higher resolution for professional quality
         val bitmaps = paths.mapNotNull { decodeSampledBitmap(it, 2000, 2000) }
         if (bitmaps.isEmpty()) return@withContext null
 
         try {
             val margin = 40
+
+            if (bitmaps.size == 2) {
+                // Two-image mode: uniform-width vertical stacking (front above, back below).
+                // Both cards are scaled to fill the same width so they line up perfectly.
+                val bmp0 = bitmaps[0]
+                val bmp1 = bitmaps[1]
+
+                val maxCanvasWidth = 2400
+                val targetW = minOf(maxOf(bmp0.width, bmp1.width), maxCanvasWidth)
+
+                // Scale each bitmap to targetW, preserve aspect ratio
+                val scale0 = targetW.toFloat() / bmp0.width.toFloat()
+                val scale1 = targetW.toFloat() / bmp1.width.toFloat()
+                val scaledH0 = (bmp0.height * scale0).toInt().coerceAtLeast(1)
+                val scaledH1 = (bmp1.height * scale1).toInt().coerceAtLeast(1)
+
+                val totalHeight = margin + scaledH0 + margin + scaledH1 + margin
+
+                val combinedBitmap = Bitmap.createBitmap(targetW, totalHeight, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(combinedBitmap)
+                canvas.drawColor(0xFFFFFFFF.toInt())
+
+                // Front card
+                val dest0 = android.graphics.RectF(0f, margin.toFloat(), targetW.toFloat(), (margin + scaledH0).toFloat())
+                canvas.drawBitmap(bmp0, null, dest0, null)
+                bmp0.recycle()
+
+                // Back card — directly below front with a clean margin gap
+                val top1 = margin + scaledH0 + margin
+                val dest1 = android.graphics.RectF(0f, top1.toFloat(), targetW.toFloat(), (top1 + scaledH1).toFloat())
+                canvas.drawBitmap(bmp1, null, dest1, null)
+                bmp1.recycle()
+
+                saveBitmap(combinedBitmap, outputFile)
+                combinedBitmap.recycle()
+                return@withContext outputFile
+            }
+
+            // 3+ images: original multi-page logic with scaling to stay within canvas bounds
             val rawMaxWidth = bitmaps.maxOf { it.width } + (margin * 2)
             val rawTotalHeight = bitmaps.sumOf { it.height } + (margin * (bitmaps.size + 1))
 
-            // Bound dimensions to maximum 2400 x 3500 (safe high-res document canvas) to prevent OOM / Canvas crash
             val maxCanvasWidth = 2400
             val maxCanvasHeight = 3500
             val scale = minOf(1.0f, maxCanvasWidth.toFloat() / rawMaxWidth.toFloat(), maxCanvasHeight.toFloat() / rawTotalHeight.toFloat())
@@ -183,8 +220,8 @@ object ImageProcessor {
 
             val combinedBitmap = Bitmap.createBitmap(finalWidth, finalHeight, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(combinedBitmap)
-            canvas.drawColor(0xFFFFFFFF.toInt()) // Crisp white background
-            
+            canvas.drawColor(0xFFFFFFFF.toInt())
+
             var currentHeight = scaledMargin
             for (bitmap in bitmaps) {
                 val targetBmpW = (bitmap.width * scale).toInt().coerceAtLeast(1)
@@ -193,11 +230,11 @@ object ImageProcessor {
                 val destRect = android.graphics.RectF(left, currentHeight, left + targetBmpW, currentHeight + targetBmpH)
                 canvas.drawBitmap(bitmap, null, destRect, null)
                 currentHeight += targetBmpH + scaledMargin
-                bitmap.recycle() // Release original individual bitmap immediately
+                bitmap.recycle()
             }
 
             saveBitmap(combinedBitmap, outputFile)
-            combinedBitmap.recycle() // Release combined bitmap canvas source
+            combinedBitmap.recycle()
             outputFile
         } catch (e: Throwable) {
             e.printStackTrace()
@@ -212,14 +249,14 @@ object ImageProcessor {
             // A single image must never be shrunken onto an A4 page with blank margins.
             return@withContext combineImages(paths, outputFile)
         }
-        
+
         var a4Bitmap: Bitmap? = null
         var bitmaps: List<Bitmap> = emptyList()
         try {
-            // Standard A4 aspect ratio is 1:1.414. We use 1654 x 2339 (excellent balance of size & high scan document definition)
+            // Standard A4 at high-res: 1654 x 2339 px (200 DPI — crisp, lightweight, universally printable)
             val a4Width = 1654
             val a4Height = 2339
-            
+
             a4Bitmap = Bitmap.createBitmap(a4Width, a4Height, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(a4Bitmap)
             canvas.drawColor(0xFFFFFFFF.toInt()) // crisp white paper background
@@ -228,34 +265,28 @@ object ImageProcessor {
             if (bitmaps.size < 2) {
                 bitmaps.forEach { if (!it.isRecycled) it.recycle() }
                 a4Bitmap.recycle()
-                // Fallback to regular combine if one of the images failed decoding
                 return@withContext combineImages(paths, outputFile)
             }
-            val margin = 50f
-            // Professional Cyber Cafe A4 ID Card Xerox Placement:
-            // Front & Back are placed together in the UPPER HALF of the A4 page with uniform widths,
-            // neatly centered horizontally, separated by a clean 1 cm (~80 px) gap.
-            // The entire lower half is left clean and open (standard for self-attestation signatures & bank KYC).
-            val bmp0 = bitmaps[0]
-            val bmp1 = bitmaps[1]
 
-            val isPortrait0 = bmp0.height > bmp0.width
-            val isPortrait1 = bmp1.height > bmp1.width
-            val isPortrait = isPortrait0 || isPortrait1
+            val bmp0 = bitmaps[0]  // Front
+            val bmp1 = bitmaps[1]  // Back
 
-            // Target uniform width for ID cards on A4: ~50% of A4 width for landscape, ~38% for portrait
-            val targetCardWidth = if (isPortrait) (a4Width * 0.38f).toInt() else (a4Width * 0.52f).toInt()
-            val maxCardHeight = (a4Height * 0.30f).toInt()
+            // ─── Layout constants ───────────────────────────────────────────────
+            // Top margin from A4 edge (px) — standard xerox printout top gap
+            val topMargin = 120f
+            // Horizontal side padding so cards don't touch the A4 edge
+            val sidePadding = (a4Width * 0.07f)
+            // Maximum card width = A4 width minus side padding on both sides (~86% of A4 width)
+            val maxCardWidth = (a4Width - 2 * sidePadding).toInt()
+            // Gap between front and back card
+            val interCardGap = 70f
 
-            // Card 0 (Front)
-            val scale0 = kotlin.math.min(
-                targetCardWidth / bmp0.width.toFloat(),
-                maxCardHeight / bmp0.height.toFloat()
-            )
-            val drawW0 = (bmp0.width * scale0).toInt()
-            val drawH0 = (bmp0.height * scale0).toInt()
-            val left0 = (a4Width - drawW0) / 2f
-            val top0 = 150f // Standard top margin on A4 sheet
+            // ─── Card 0 (Front) — scale to fill maxCardWidth, preserve aspect ratio ───
+            val scale0 = maxCardWidth.toFloat() / bmp0.width.toFloat()
+            val drawW0 = maxCardWidth
+            val drawH0 = (bmp0.height * scale0).toInt().coerceAtLeast(1)
+            val left0 = sidePadding
+            val top0 = topMargin
 
             if (drawW0 > 0 && drawH0 > 0) {
                 val scaledBmp = Bitmap.createScaledBitmap(bmp0, drawW0, drawH0, true)
@@ -264,15 +295,11 @@ object ImageProcessor {
             }
             bmp0.recycle()
 
-            // Card 1 (Back)
-            val scale1 = kotlin.math.min(
-                targetCardWidth / bmp1.width.toFloat(),
-                maxCardHeight / bmp1.height.toFloat()
-            )
-            val drawW1 = (bmp1.width * scale1).toInt()
-            val drawH1 = (bmp1.height * scale1).toInt()
-            val left1 = (a4Width - drawW1) / 2f
-            val interCardGap = 80f // Clean ~1 cm gap between Front and Back
+            // ─── Card 1 (Back) — same width as Front, directly below with gap ───
+            val scale1 = maxCardWidth.toFloat() / bmp1.width.toFloat()
+            val drawW1 = maxCardWidth
+            val drawH1 = (bmp1.height * scale1).toInt().coerceAtLeast(1)
+            val left1 = sidePadding
             val top1 = top0 + drawH0 + interCardGap
 
             if (drawW1 > 0 && drawH1 > 0) {
@@ -282,7 +309,7 @@ object ImageProcessor {
             }
             bmp1.recycle()
 
-            // If extra unused bitmaps were loaded, recycle them too
+            // Recycle any extra bitmaps if more than 2 were loaded
             if (bitmaps.size > 2) {
                 for (i in 2 until bitmaps.size) {
                     if (!bitmaps[i].isRecycled) bitmaps[i].recycle()

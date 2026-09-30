@@ -1269,9 +1269,9 @@ class HomeViewModel(
                 _statusMessage.value = "Creating preview image..."
                 updateQueueStatus(queueId, "Creating preview image...")
                 val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
-                // Single page scans are NEVER placed on an A4 canvas (exact crop preserved).
-                // A4 Sheet Canvas strictly applies to 2-card scans (Front & Back of ID card).
-                val isId = imageUris.size == 2 && useA4Format.value && (isImageIdCard(context, imageUris[0]) || isImageIdCard(context, imageUris[1]))
+                // A4 Sheet Canvas: strictly for exactly 2 pages when the user enabled the A4 format toggle.
+                // OFF → clean vertical stacking (combineImages); ON → A4 xerox layout (combineImagesToA4).
+                val isId = imageUris.size == 2 && useA4Format.value
                 val resultFile = if (isId) {
                     ImageProcessor.combineImagesToA4(pageFiles.map { it.absolutePath }, combinedFile)
                 } else {
@@ -1424,9 +1424,9 @@ class HomeViewModel(
                     }
 
                     val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
-                    // Single page scans are NEVER placed on an A4 canvas (exact crop preserved).
-                    // A4 Sheet Canvas strictly applies to 2-card scans (Front & Back of ID card).
-                    isId = newPageUris.size == 2 && useA4Format.value && (isImageIdCard(context, newPageUris[0]) || isImageIdCard(context, newPageUris[1]))
+                    // A4 Sheet Canvas: strictly for exactly 2 pages when the user enabled the A4 format toggle.
+                    // OFF → clean vertical stacking (combineImages); ON → A4 xerox layout (combineImagesToA4).
+                    isId = newPageUris.size == 2 && useA4Format.value
                     val resultFile = if (isId) {
                         ImageProcessor.combineImagesToA4(tempPageFiles.map { it.absolutePath }, combinedFile)
                     } else {
