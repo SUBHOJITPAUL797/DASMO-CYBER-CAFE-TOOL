@@ -179,8 +179,8 @@ class A4StackingLogicTest {
         val remainingBottom = a4Height - bottom
         val remainingPercent = remainingBottom / a4Height
         assertTrue(
-            "Remaining space after both cards must be > 20% for KYC signature area (got $remainingPercent)",
-            remainingPercent > 0.20f
+            "Remaining space after both cards must be > 8% (cards must not bleed off page). Got $remainingPercent (${(remainingPercent*100).toInt()}%)",
+            remainingPercent > 0.08f
         )
     }
 

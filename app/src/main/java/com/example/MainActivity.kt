@@ -1231,7 +1231,7 @@ fun MainScreen(
                                 }
                             }
 
-                            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -1292,7 +1292,7 @@ fun MainScreen(
                                 }
                             }
 
-                            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1413,7 +1413,7 @@ fun MainScreen(
                             Spacer(modifier = Modifier.height(8.dp))
                             
                             LinearProgressIndicator(
-                                progress = progress,
+                                progress = { progress },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(8.dp)
@@ -2076,7 +2076,7 @@ fun MainScreen(
                                         }
                                     }
 
-                                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
@@ -2147,7 +2147,7 @@ fun MainScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
 
-                                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
 
                                 Column(
                                     modifier = Modifier.fillMaxWidth(),
@@ -2273,7 +2273,7 @@ fun MainScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
 
-                                Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -2550,7 +2550,7 @@ fun MainScreen(
                                 }
 
                                 LinearProgressIndicator(
-                                    progress = progress,
+                                    progress = { progress },
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(8.dp)
@@ -4295,7 +4295,7 @@ fun MainScreen(
                         }
                     }
 
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                     // Folders list
                     Row(
@@ -4398,7 +4398,7 @@ fun MainScreen(
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                 }
-                                Divider(color = MaterialTheme.colorScheme.surfaceVariant)
+                                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                             }
                         }
                     }
@@ -4467,7 +4467,7 @@ fun MainScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
 
-                    Divider(color = MaterialTheme.colorScheme.surfaceVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Person Name", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
@@ -4614,7 +4614,7 @@ fun MainScreen(
                         }
                     }
 
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                     if (editScannedUris == null) {
                         Button(
