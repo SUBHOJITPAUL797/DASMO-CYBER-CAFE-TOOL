@@ -92,16 +92,35 @@ android {
 
 ---
 
-### 🔹 Step 2: Build the Signed/Release APK
+### 🔹 Step 2: Build and Verify the Signed Release APK
 
-In Android Studio:
-1. Go to top menu: **Build** ➔ **Build Bundle(s) / APK(s)** ➔ **Build APK(s)**.
-2. Or in terminal:
+> [!IMPORTANT]
+> **Android OS blocks unsigned or mismatched APKs with "App not installed".**
+> Never upload an APK without verifying its cryptographic signature!
+
+#### Option A: One-Command Automated Build & Signature Verification (Recommended)
+Simply run the included build script in PowerShell from the project root:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-release.ps1
+```
+This script automatically:
+1. Compiles the release build with Gradle.
+2. Checks keystore signing configuration.
+3. Automatically runs `apksigner verify --print-certs` to guarantee the cryptographic signature is 100% valid.
+4. Generates and copies the ready-to-upload APK (e.g., `dasmo-scanner-v1.3.0.apk`) right in your project root!
+
+#### Option B: Manual Terminal Build & Verification
+1. Run release build:
    ```bash
    ./gradlew assembleRelease
    ```
-3. Locate the generated APK (usually in `app/build/outputs/apk/release/` or `app/build/outputs/apk/debug/`).
-4. Rename it clearly (e.g. `dasmo-photo-print-v1.0.1.apk` or `dasmo-scanner-v1.0.1.apk`).
+2. Locate the APK in `app/build/outputs/apk/release/app-release.apk`.
+3. **Always verify before uploading**:
+   ```bash
+   apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+   ```
+   Ensure it prints `Verifies: true` and shows a valid SHA-256 certificate digest!
+4. Rename it (e.g. `dasmo-scanner-v1.3.0.apk`).
 
 ---
 
