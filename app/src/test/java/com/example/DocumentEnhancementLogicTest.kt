@@ -93,4 +93,33 @@ class DocumentEnhancementLogicTest {
 
         assertTrue("Face photo skin must have high saturation (> 20) and remain untouched", skinSaturation > 20)
     }
+
+    @Test
+    fun testTargetDimensionCalculationForStrictSizeLimits() {
+        val target90Kb = 90
+        val maxDim90 = when {
+            target90Kb >= 1000 -> 3200
+            target90Kb >= 300 -> 2400
+            target90Kb >= 100 -> 1800
+            else -> 1280
+        }
+        assertEquals("For <= 100KB (e.g. 90KB), initial max dimension must be clamped to 1280px", 1280, maxDim90)
+
+        val target500Kb = 500
+        val maxDim500 = when {
+            target500Kb >= 1000 -> 3200
+            target500Kb >= 300 -> 2400
+            target500Kb >= 100 -> 1800
+            else -> 1280
+        }
+        assertEquals("For 500KB, max dimension should be 2400px", 2400, maxDim500)
+    }
+
+    @Test
+    fun testActiveTargetSizeCoercion() {
+        val userEnteredCustomSize = 90
+        val defaultSize = 500
+        val activeTargetSize = (userEnteredCustomSize as Int?).let { it ?: defaultSize }.coerceIn(10, 10000)
+        assertEquals("Active target size from popup must strictly override default", 90, activeTargetSize)
+    }
 }

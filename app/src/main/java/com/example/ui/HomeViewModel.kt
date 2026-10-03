@@ -698,7 +698,8 @@ class HomeViewModel(
         val documentType: String,
         val format: UploadFormat,
         val status: String, // "Analyzing (NVIDIA AI)...", "Uploading PDF/JPEG...", "Completed", "Failed"
-        val timestamp: Long = System.currentTimeMillis()
+        val timestamp: Long = System.currentTimeMillis(),
+        val docId: Int? = null
     )
 
     private val _activeQueue = MutableStateFlow<List<QueueItem>>(emptyList())
@@ -1455,7 +1456,13 @@ class HomeViewModel(
         processMultiScannedImages(imageUris)
     }
 
-    fun confirmAndUpload(context: Context, personName: String, documentType: String, format: UploadFormat) {
+    fun confirmAndUpload(
+        context: Context,
+        personName: String,
+        documentType: String,
+        format: UploadFormat,
+        customTargetSizeKb: Int? = null
+    ) {
         val pending = _pendingDocuments.value.firstOrNull() ?: return
         _pendingDocuments.update { it.drop(1) }
         val queueId = pending.queueId
@@ -1470,6 +1477,8 @@ class HomeViewModel(
         } else {
             documentType.trim()
         }
+
+        val activeTargetSize = (customTargetSizeKb ?: targetSizeKb.value).coerceIn(10, 10000)
 
         // Update queue item info, format & status
         _activeQueue.update { it.map { item ->
@@ -1500,13 +1509,28 @@ class HomeViewModel(
             val finalPdfName = "${finalNameBase}.pdf"
             val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
             
-            // Save locally first to guarantee offline record!
+            // Re-compress to true JPEG matching activeTargetSize (e.g. 90 KB)
+            val sourceImage = if (pending.pageFiles != null && pending.pageFiles.size == 1 && pending.pageFiles.first().exists()) {
+                pending.pageFiles.first()
+            } else {
+                pending.compressedFile
+            }
+
             val localCopy = File(context.filesDir, finalJpgName)
             try {
-                // BUG FIX: guard against FileNotFoundException if file was cleaned up by a race/cancel
-                if (pending.compressedFile.exists()) {
+                if (sourceImage.exists()) {
+                    val recompressed = ImageProcessor.compressImage(
+                        file = sourceImage,
+                        targetSizeKb = activeTargetSize,
+                        format = "JPEG",
+                        autoEnhance = false
+                    )
+                    recompressed.copyTo(localCopy, overwrite = true)
+                    try { recompressed.delete() } catch (e: Exception) {}
+                } else if (pending.compressedFile.exists()) {
                     pending.compressedFile.copyTo(localCopy, overwrite = true)
                 }
+
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                     if (localCopy.exists()) {
                         ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
@@ -1514,15 +1538,39 @@ class HomeViewModel(
                 }
             } catch (ecop: Exception) {
                 ecop.printStackTrace()
+                if (!localCopy.exists() && pending.compressedFile.exists()) {
+                    try { pending.compressedFile.copyTo(localCopy, overwrite = true) } catch (e: Exception) {}
+                }
             }
 
-            // Insert locally first
+            // PDF preparation in filesDir (PERSISTENT - never deleted)
+            val localPdf = File(context.filesDir, finalPdfName)
+            if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                try {
+                    _statusMessage.value = "Generating and structuring PDF..."
+                    updateQueueStatus(queueId, "Generating structured PDF...")
+                    if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
+                        ImageProcessor.convertToMultiPagePdf(pending.pageFiles, localPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
+                    } else {
+                        ImageProcessor.convertToPdf(localCopy, localPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
+                    }
+                    if (localPdf.exists()) {
+                        ImageProcessor.exportToPublicDocuments(context, localPdf, finalPdfName, "application/pdf")
+                    }
+                } catch (epdf: Exception) {
+                    epdf.printStackTrace()
+                }
+            }
+
+            val primaryLocalFile = if ((format == UploadFormat.PDF || format == UploadFormat.BOTH) && localPdf.exists()) localPdf else localCopy
+
+            // Insert locally first with exact matching path
             val insertId = try {
                 val newEntity = DocumentEntity(
                     fileName = dbFileName,
                     personName = checkedPersonName,
                     documentType = checkedDocumentType,
-                    localFilePath = localCopy.absolutePath,
+                    localFilePath = primaryLocalFile.absolutePath,
                     timestamp = System.currentTimeMillis(),
                     isUploaded = false,
                     drivePath = null
@@ -1530,6 +1578,7 @@ class HomeViewModel(
                 val id = database.documentDao().insertDocument(newEntity)
                 if (id != -1L) {
                     incrementUserScannedCount()
+                    updateQueueDocId(queueId, id.toInt())
                 }
                 id
             } catch (edb: Exception) {
@@ -1544,6 +1593,7 @@ class HomeViewModel(
                 updateQueueStatus(queueId, "Saved locally (Sign-In required)")
                 _isProcessing.value = false
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
+                pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
                 fetchDriveFiles(context)
                 return@launch
             }
@@ -1556,6 +1606,7 @@ class HomeViewModel(
                     updateQueueStatus(queueId, "Saved locally (Token failed)")
                     _isProcessing.value = false
                     try { pending.compressedFile.delete() } catch (el: Exception) {}
+                    pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
                     fetchDriveFiles(context)
                     return@launch
                 }
@@ -1574,43 +1625,46 @@ class HomeViewModel(
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                     _statusMessage.value = "Uploading compressed image to Google Drive..."
                     updateQueueStatus(queueId, "Uploading image standard file...")
-                    isJpgUploaded = retryIO(times = 3) {
+                    val (uploaded, freshToken) = uploadFileWithAuthRetry(
+                        context = context,
+                        email = email,
+                        initialToken = obtainedToken,
+                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                    ) { token ->
                         GoogleDriveClient.uploadFile(
-                            accessToken = obtainedToken,
-                            file = pending.compressedFile,
+                            accessToken = token,
+                            file = localCopy,
                             mimeType = "image/jpeg",
                             fileName = finalJpgName,
                             parentId = uploadParentId
                         )
                     }
+                    isJpgUploaded = uploaded
+                    if (freshToken != null) obtainedToken = freshToken
                 }
 
                 if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                    _statusMessage.value = "Generating and structuring PDF..."
-                    updateQueueStatus(queueId, "Generating structured PDF...")
-                    val pdfFile = File(context.cacheDir, "${java.util.UUID.randomUUID()}_pdf.pdf")
-                    try {
-                        if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
-                            ImageProcessor.convertToMultiPagePdf(pending.pageFiles, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
-                        } else {
-                            ImageProcessor.convertToPdf(pending.compressedFile, pdfFile, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
-                        }
-                        ImageProcessor.exportToPublicDocuments(context, pdfFile, finalPdfName, "application/pdf")
-
-                        _statusMessage.value = "Uploading structured PDF to Google Drive..."
-                        updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                        isPdfUploaded = retryIO(times = 3) {
-                            GoogleDriveClient.uploadFile(
-                                accessToken = obtainedToken,
-                                file = pdfFile,
-                                mimeType = "application/pdf",
-                                fileName = finalPdfName,
-                                parentId = uploadParentId
-                            )
-                        }
-                    } finally {
-                        try { pdfFile.delete() } catch (ep: Exception) {}
+                    if (!localPdf.exists()) {
+                        throw java.io.FileNotFoundException("PDF file not found: ${localPdf.absolutePath}")
                     }
+                    _statusMessage.value = "Uploading structured PDF to Google Drive..."
+                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                    val (uploaded, freshToken) = uploadFileWithAuthRetry(
+                        context = context,
+                        email = email,
+                        initialToken = obtainedToken,
+                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                    ) { token ->
+                        GoogleDriveClient.uploadFile(
+                            accessToken = token,
+                            file = localPdf,
+                            mimeType = "application/pdf",
+                            fileName = finalPdfName,
+                            parentId = uploadParentId
+                        )
+                    }
+                    isPdfUploaded = uploaded
+                    if (freshToken != null) obtainedToken = freshToken
                 }
 
                 val overallSuccess = if (format == UploadFormat.BOTH) isJpgUploaded && isPdfUploaded 
@@ -1627,7 +1681,7 @@ class HomeViewModel(
                             fileName = dbFileName,
                             personName = checkedPersonName,
                             documentType = checkedDocumentType,
-                            localFilePath = localCopy.absolutePath,
+                            localFilePath = primaryLocalFile.absolutePath,
                             timestamp = System.currentTimeMillis(),
                             isUploaded = true,
                             drivePath = builtDrivePath
@@ -1688,74 +1742,109 @@ class HomeViewModel(
         checkedDocumentType: String,
         format: UploadFormat,
         existingDocId: Int? = null,
-        pageFiles: List<File>? = null
+        pageFiles: List<File>? = null,
+        customTargetSizeKb: Int? = null
     ) {
         var obtainedToken: String? = null
         var finalJpgName = ""
         var finalPdfName = ""
-        var localCopy: File? = null
         var oldJpgName: String? = null
         var oldPdfName: String? = null
+        val activeTargetSize = (customTargetSizeKb ?: targetSizeKb.value).coerceIn(10, 10000)
 
         try {
             val isRetry = existingDocId != null
+            var existingDoc: DocumentEntity? = null
             if (isRetry) {
-                val existingDoc = database.documentDao().getAllDocuments().first().find { it.id == existingDocId }
+                existingDoc = database.documentDao().getAllDocuments().first().find { it.id == existingDocId }
                 if (existingDoc != null) {
                     if (existingDoc.fileName.endsWith(".pdf", ignoreCase = true)) {
                         oldPdfName = existingDoc.fileName
-                        oldJpgName = existingDoc.fileName.replace(".pdf", ".jpeg").replace(".PDF", ".jpeg")
+                        oldJpgName = existingDoc.fileName.substringBeforeLast(".") + ".jpeg"
                     } else {
                         oldJpgName = existingDoc.fileName
-                        oldPdfName = existingDoc.fileName.replace(".jpeg", ".pdf").replace(".jpg", ".pdf")
+                        oldPdfName = existingDoc.fileName.substringBeforeLast(".") + ".pdf"
                     }
-                    localCopy = File(existingDoc.localFilePath)
                 }
             }
 
             val safePersonName = checkedPersonName.replace(" ", "_").trim()
             val safeDocumentType = checkedDocumentType.replace(" ", "_").trim()
-            val suffixId = java.util.UUID.randomUUID().toString().take(4)
-            val finalNameBase = if (nameBeforeType.value) {
-                "${safePersonName}_${safeDocumentType}_$suffixId"
+            
+            val finalNameBase: String
+            if (isRetry && existingDoc != null) {
+                finalNameBase = existingDoc.fileName.substringBeforeLast(".")
             } else {
-                "${safeDocumentType}_${safePersonName}_$suffixId"
+                val suffixId = java.util.UUID.randomUUID().toString().take(4)
+                finalNameBase = if (nameBeforeType.value) {
+                    "${safePersonName}_${safeDocumentType}_$suffixId"
+                } else {
+                    "${safeDocumentType}_${safePersonName}_$suffixId"
+                }
             }
             finalJpgName = "${finalNameBase}.jpeg"
             finalPdfName = "${finalNameBase}.pdf"
-            
-            val safeLocalCopy = localCopy ?: File(context.filesDir, finalJpgName)
-            if (localCopy == null || localCopy.absolutePath != safeLocalCopy.absolutePath) {
+
+            val safeLocalJpg = File(context.filesDir, finalJpgName)
+            val safeLocalPdf = File(context.filesDir, finalPdfName)
+
+            // 1. Prepare safeLocalJpg if required
+            if (!safeLocalJpg.exists() || safeLocalJpg.length() == 0L) {
                 try {
-                    compressedFile.copyTo(safeLocalCopy, overwrite = true)
+                    val sourceImage = if (pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()) {
+                        pageFiles.first()
+                    } else {
+                        compressedFile
+                    }
+                    if (sourceImage.exists() && !sourceImage.name.endsWith(".pdf", ignoreCase = true)) {
+                        val recompressed = ImageProcessor.compressImage(
+                            file = sourceImage,
+                            targetSizeKb = activeTargetSize,
+                            format = "JPEG",
+                            autoEnhance = false
+                        )
+                        recompressed.copyTo(safeLocalJpg, overwrite = true)
+                        try { recompressed.delete() } catch (e: Exception) {}
+                    } else if (compressedFile.exists() && !compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                        compressedFile.copyTo(safeLocalJpg, overwrite = true)
+                    }
+
                     if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                        ImageProcessor.exportToPublicDocuments(context, safeLocalCopy, finalJpgName, "image/jpeg")
+                        if (safeLocalJpg.exists()) {
+                            ImageProcessor.exportToPublicDocuments(context, safeLocalJpg, finalJpgName, "image/jpeg")
+                        }
                     }
                 } catch (ecop: Exception) {
                     ecop.printStackTrace()
                 }
             }
 
-            val safeLocalPdf = File(context.filesDir, finalPdfName)
-            var isPdfGenerated = false
+            // 2. Prepare safeLocalPdf if PDF format
             if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                try {
-                    val pdfResult = if (pageFiles != null && pageFiles.isNotEmpty()) {
-                        ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
-                    } else {
-                        ImageProcessor.convertToPdf(safeLocalCopy, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
+                if (!safeLocalPdf.exists() || safeLocalPdf.length() == 0L) {
+                    try {
+                        if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                            // Already a valid PDF file on disk! Copy directly, never decode with BitmapFactory
+                            compressedFile.copyTo(safeLocalPdf, overwrite = true)
+                        } else if (pageFiles != null && pageFiles.isNotEmpty()) {
+                            ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
+                        } else if (safeLocalJpg.exists() && safeLocalJpg.length() > 0L) {
+                            ImageProcessor.convertToPdf(safeLocalJpg, safeLocalPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
+                        } else if (compressedFile.exists() && !compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                            ImageProcessor.convertToPdf(compressedFile, safeLocalPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
+                        }
+
+                        if (safeLocalPdf.exists()) {
+                            ImageProcessor.exportToPublicDocuments(context, safeLocalPdf, finalPdfName, "application/pdf")
+                        }
+                    } catch (ep: Exception) {
+                        ep.printStackTrace()
                     }
-                    if (pdfResult != null && safeLocalPdf.exists()) {
-                        isPdfGenerated = true
-                        ImageProcessor.exportToPublicDocuments(context, safeLocalPdf, finalPdfName, "application/pdf")
-                    }
-                } catch (ep: Exception) {
-                    ep.printStackTrace()
                 }
             }
 
             val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
-            val primaryLocalFile = if ((format == UploadFormat.PDF || format == UploadFormat.BOTH) && safeLocalPdf.exists()) safeLocalPdf else safeLocalCopy
+            val primaryLocalFile = if ((format == UploadFormat.PDF || format == UploadFormat.BOTH) && safeLocalPdf.exists()) safeLocalPdf else safeLocalJpg
 
             // Insert or Update local DB with the actual matching file path
             val insertId = try {
@@ -1781,6 +1870,10 @@ class HomeViewModel(
                 existingDocId?.toLong() ?: -1L
             }
 
+            if (insertId != -1L) {
+                updateQueueDocId(queueId, insertId.toInt())
+            }
+
             updateQueueStatus(queueId, "Authorizing Google Drive...")
             
             val email = settingsRepository.googleEmail.first()
@@ -1794,154 +1887,104 @@ class HomeViewModel(
             }
 
             var uploadSuccess = false
-            var attempts = 0
-            val maxAttempts = 3
 
-            while (!uploadSuccess && attempts < maxAttempts) {
-                attempts++
-                if (attempts > 1) {
-                    updateQueueStatus(queueId, "Drive upload failed. Auto-retrying (Attempt $attempts of $maxAttempts)...")
-                    kotlinx.coroutines.delay(5000L)
+            backgroundUploadMutex.withLock {
+                obtainedToken = getAccessToken(context, email)
+                if (obtainedToken == null) {
+                    updateQueueStatus(queueId, "Saved locally (Token failed)")
+                    fetchDriveFiles(context)
+                    return@withLock
                 }
 
-                backgroundUploadMutex.withLock {
-                    try {
-                        obtainedToken = getAccessToken(context, email)
-                        if (obtainedToken == null) {
-                            updateQueueStatus(queueId, "Saved locally (Token failed)")
-                            fetchDriveFiles(context)
-                            return@withLock
-                        }
+                var uploadParentId = folderId
+                if (subFolderName.isNotEmpty()) {
+                    updateQueueStatus(queueId, "Locating folder: $subFolderName...")
+                    uploadParentId = getCachedOrFetchSubFolder(obtainedToken!!, subFolderName, folderId)
+                }
 
-                        var uploadParentId = folderId
-                        var isJpgUploaded = false
-                        var isPdfUploaded = false
+                var isJpgUploaded = false
+                var isPdfUploaded = false
 
-                        var tokenAttempts = 0
-                        val maxTokenAttempts = 2
-
-                        while (tokenAttempts < maxTokenAttempts) {
-                            try {
-                                val token = obtainedToken ?: break
-                                
-                                if (subFolderName.isNotEmpty()) {
-                                    updateQueueStatus(queueId, "Locating subfolder: $subFolderName...")
-                                    uploadParentId = getCachedOrFetchSubFolder(token, subFolderName, folderId)
-                                }
-
-                                if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                                    updateQueueStatus(queueId, "Uploading image standard file...")
-                                    isJpgUploaded = retryIO(times = 3) {
-                                        GoogleDriveClient.uploadFile(
-                                            accessToken = token,
-                                            file = safeLocalCopy,
-                                            mimeType = "image/jpeg",
-                                            fileName = finalJpgName,
-                                            parentId = uploadParentId,
-                                            oldFileName = oldJpgName
-                                        )
-                                    }
-                                }
-
-                                if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
-                                    if (!safeLocalPdf.exists()) {
-                                        updateQueueStatus(queueId, "Generating structured PDF...")
-                                        if (pageFiles != null && pageFiles.isNotEmpty()) {
-                                            ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
-                                        } else {
-                                            ImageProcessor.convertToPdf(safeLocalCopy, safeLocalPdf, targetSizeKb.value, autoEnhance = autoEnhanceEnabled.value)
-                                        }
-                                        if (safeLocalPdf.exists()) {
-                                            ImageProcessor.exportToPublicDocuments(context, safeLocalPdf, finalPdfName, "application/pdf")
-                                        }
-                                    }
-
-                                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
-                                    isPdfUploaded = retryIO(times = 3) {
-                                        GoogleDriveClient.uploadFile(
-                                            accessToken = token,
-                                            file = safeLocalPdf,
-                                            mimeType = "application/pdf",
-                                            fileName = finalPdfName,
-                                            parentId = uploadParentId,
-                                            oldFileName = oldPdfName
-                                        )
-                                    }
-                                }
-
-                                break
-
-                            } catch (e: Exception) {
-                                val errorMsg = e.message ?: ""
-                                android.util.Log.e("HomeViewModel", "Background upload try failed: $errorMsg", e)
-                                
-                                val isAuthError = errorMsg.contains("401") || 
-                                                  errorMsg.contains("unauthorized", ignoreCase = true) || 
-                                                  errorMsg.contains("token", ignoreCase = true) || 
-                                                  errorMsg.contains("auth", ignoreCase = true)
-                                
-                                if (isAuthError && tokenAttempts < maxTokenAttempts - 1) {
-                                    tokenAttempts++
-                                    updateQueueStatus(queueId, "Token expired. Refreshing...")
-                                    
-                                    obtainedToken?.let { staleToken ->
-                                        withContext(Dispatchers.IO) {
-                                            try {
-                                                com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, staleToken)
-                                            } catch (ex: Exception) {
-                                                ex.printStackTrace()
-                                            }
-                                        }
-                                    }
-                                    
-                                    obtainedToken = getAccessToken(context, email)
-                                    if (obtainedToken == null) {
-                                        updateQueueStatus(queueId, "Saved locally (Token refresh failed)")
-                                        break
-                                    }
-                                } else {
-                                    throw e
-                                }
-                            }
-                        }
-
-                        val overallSuccess = if (format == UploadFormat.BOTH) isJpgUploaded && isPdfUploaded 
-                                             else if (format == UploadFormat.JPEG) isJpgUploaded
-                                             else isPdfUploaded
-
-                        val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
-                        val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
-
-                        if (overallSuccess) {
-                            if (insertId != -1L) {
-                                try {
-                                    val updatedEntity = DocumentEntity(
-                                        id = insertId.toInt(),
-                                        fileName = dbFileName,
-                                        personName = checkedPersonName,
-                                        documentType = checkedDocumentType,
-                                        localFilePath = primaryLocalFile.absolutePath,
-                                        timestamp = System.currentTimeMillis(),
-                                        isUploaded = true,
-                                        drivePath = builtDrivePath
-                                    )
-                                    database.documentDao().updateDocument(updatedEntity)
-                                } catch (eup: Exception) {
-                                    eup.printStackTrace()
-                                }
-                            }
-                            fetchDriveFiles(context)
-                            updateQueueStatus(queueId, "Completed")
-                            uploadSuccess = true
-                        } else {
-                            updateQueueStatus(queueId, "Saved locally (Drive fail)")
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        val msg = e.message ?: "Unknown error"
-                        updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})")
-                        obtainedToken?.let { invalidateCachedToken(context, it) }
+                if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
+                    if (!safeLocalJpg.exists()) {
+                        throw java.io.FileNotFoundException("JPEG file not found: ${safeLocalJpg.absolutePath}")
                     }
+                    updateQueueStatus(queueId, "Uploading image standard file...")
+                    val (uploaded, freshToken) = uploadFileWithAuthRetry(
+                        context = context,
+                        email = email,
+                        initialToken = obtainedToken,
+                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                    ) { token ->
+                        GoogleDriveClient.uploadFile(
+                            accessToken = token,
+                            file = safeLocalJpg,
+                            mimeType = "image/jpeg",
+                            fileName = finalJpgName,
+                            parentId = uploadParentId,
+                            oldFileName = oldJpgName
+                        )
+                    }
+                    isJpgUploaded = uploaded
+                    if (freshToken != null) obtainedToken = freshToken
+                }
+
+                if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                    if (!safeLocalPdf.exists()) {
+                        throw java.io.FileNotFoundException("PDF file not found: ${safeLocalPdf.absolutePath}")
+                    }
+                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                    val (uploaded, freshToken) = uploadFileWithAuthRetry(
+                        context = context,
+                        email = email,
+                        initialToken = obtainedToken,
+                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                    ) { token ->
+                        GoogleDriveClient.uploadFile(
+                            accessToken = token,
+                            file = safeLocalPdf,
+                            mimeType = "application/pdf",
+                            fileName = finalPdfName,
+                            parentId = uploadParentId,
+                            oldFileName = oldPdfName
+                        )
+                    }
+                    isPdfUploaded = uploaded
+                    if (freshToken != null) obtainedToken = freshToken
+                }
+
+                val overallSuccess = when (format) {
+                    UploadFormat.BOTH -> isJpgUploaded && isPdfUploaded
+                    UploadFormat.JPEG -> isJpgUploaded
+                    UploadFormat.PDF -> isPdfUploaded
+                }
+
+                val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
+                val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
+
+                if (overallSuccess) {
+                    if (insertId != -1L) {
+                        try {
+                            val updatedEntity = DocumentEntity(
+                                id = insertId.toInt(),
+                                fileName = dbFileName,
+                                personName = checkedPersonName,
+                                documentType = checkedDocumentType,
+                                localFilePath = primaryLocalFile.absolutePath,
+                                timestamp = System.currentTimeMillis(),
+                                isUploaded = true,
+                                drivePath = builtDrivePath
+                            )
+                            database.documentDao().updateDocument(updatedEntity)
+                        } catch (eup: Exception) {
+                            eup.printStackTrace()
+                        }
+                    }
+                    fetchDriveFiles(context)
+                    updateQueueStatus(queueId, "Completed")
+                    uploadSuccess = true
+                } else {
+                    updateQueueStatus(queueId, "Saved locally (Drive fail)")
                 }
             }
 
@@ -1953,7 +1996,6 @@ class HomeViewModel(
             e.printStackTrace()
             val msg = e.message ?: "Unknown error"
             updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})")
-            obtainedToken?.let { invalidateCachedToken(context, it) }
             showUploadFailedNotification(context, checkedPersonName, checkedDocumentType)
         } finally {
             if (existingDocId == null) {
@@ -1962,6 +2004,78 @@ class HomeViewModel(
                     try { file.delete() } catch (ex: Exception) {}
                 }
             }
+        }
+    }
+
+    private suspend fun uploadFileWithAuthRetry(
+        context: Context,
+        email: String,
+        initialToken: String?,
+        onStatusUpdate: (String) -> Unit,
+        uploadAction: suspend (token: String) -> Boolean
+    ): Pair<Boolean, String?> {
+        var currentToken = initialToken ?: getAccessToken(context, email)
+        if (currentToken == null) {
+            return Pair(false, null)
+        }
+
+        var attempts = 0
+        val maxAttempts = 3
+        var backoffDelay = 1500L
+
+        while (attempts < maxAttempts) {
+            val tokenToUse = currentToken ?: break
+            attempts++
+            try {
+                val success = uploadAction(tokenToUse)
+                if (success) {
+                    return Pair(true, tokenToUse)
+                }
+            } catch (e: Exception) {
+                val errMsg = e.message ?: ""
+                android.util.Log.w("HomeViewModel", "Upload attempt $attempts failed: $errMsg", e)
+
+                val isAuthError = errMsg.contains("401") ||
+                        errMsg.contains("unauthorized", ignoreCase = true) ||
+                        errMsg.contains("invalid_token", ignoreCase = true) ||
+                        errMsg.contains("token", ignoreCase = true) ||
+                        errMsg.contains("auth", ignoreCase = true)
+
+                if (isAuthError) {
+                    onStatusUpdate("Auth expired. Refreshing token...")
+                    withContext(Dispatchers.IO) {
+                        try {
+                            com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, tokenToUse)
+                        } catch (ex: Exception) {
+                            ex.printStackTrace()
+                        }
+                    }
+                    val freshToken = getAccessToken(context, email)
+                    if (freshToken == null) {
+                        android.util.Log.e("HomeViewModel", "Failed to refresh token after auth error")
+                        return Pair(false, null)
+                    }
+                    currentToken = freshToken
+                    continue
+                }
+
+                if (attempts >= maxAttempts) {
+                    throw e
+                }
+
+                onStatusUpdate("Network issue. Resuming ($attempts/$maxAttempts)...")
+                kotlinx.coroutines.delay(backoffDelay)
+                backoffDelay = (backoffDelay * 2).coerceAtMost(6000L)
+            }
+        }
+        return Pair(false, currentToken)
+    }
+
+    suspend fun clearGoogleToken(context: Context, token: String) = withContext(Dispatchers.IO) {
+        try {
+            com.google.android.gms.auth.GoogleAuthUtil.clearToken(context, token)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -1986,32 +2100,57 @@ class HomeViewModel(
     }
 
     fun retryUpload(context: Context, docIds: Set<Int>) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val docs = database.documentDao().getAllDocuments().first()
             val toUpload = docs.filter { it.id in docIds && !it.isUploaded }
             
             for (doc in toUpload) {
-                val file = File(doc.localFilePath)
-                if (!file.exists()) continue
-                
-                val queueId = java.util.UUID.randomUUID().toString()
-                _activeQueue.update { it + QueueItem(
-                    id = queueId,
-                    personName = doc.personName,
-                    documentType = doc.documentType,
-                    status = "Retrying upload...",
-                    format = if (doc.fileName.endsWith(".pdf", ignoreCase = true)) UploadFormat.PDF else UploadFormat.JPEG
-                ) }
-                
-                executeBackgroundUpload(
-                    context = context,
-                    queueId = queueId,
-                    compressedFile = file,
-                    checkedPersonName = doc.personName,
-                    checkedDocumentType = doc.documentType, 
-                    format = if (doc.fileName.endsWith(".pdf", ignoreCase = true)) UploadFormat.PDF else UploadFormat.JPEG,
-                    existingDocId = doc.id
-                )
+                launch {
+                    var file = File(doc.localFilePath)
+                    if (!file.exists()) {
+                        val fallback = File(context.filesDir, doc.fileName)
+                        if (fallback.exists()) {
+                            file = fallback
+                        } else {
+                            val baseName = doc.fileName.substringBeforeLast(".")
+                            val fallbackJpg = File(context.filesDir, "$baseName.jpeg")
+                            val fallbackPdf = File(context.filesDir, "$baseName.pdf")
+                            if (fallbackPdf.exists()) {
+                                file = fallbackPdf
+                            } else if (fallbackJpg.exists()) {
+                                file = fallbackJpg
+                            }
+                        }
+                    }
+
+                    if (!file.exists()) {
+                        android.util.Log.e("HomeViewModel", "Retry failed: file not found on disk for doc ${doc.id}: ${doc.localFilePath}")
+                        return@launch
+                    }
+
+                    val queueId = java.util.UUID.randomUUID().toString()
+                    val isPdf = doc.fileName.endsWith(".pdf", ignoreCase = true)
+                    val uploadFormat = if (isPdf) UploadFormat.PDF else UploadFormat.JPEG
+
+                    _activeQueue.update { it + QueueItem(
+                        id = queueId,
+                        personName = doc.personName,
+                        documentType = doc.documentType,
+                        status = "Retrying upload...",
+                        format = uploadFormat,
+                        docId = doc.id
+                    ) }
+
+                    executeBackgroundUpload(
+                        context = context,
+                        queueId = queueId,
+                        compressedFile = file,
+                        checkedPersonName = doc.personName,
+                        checkedDocumentType = doc.documentType,
+                        format = uploadFormat,
+                        existingDocId = doc.id
+                    )
+                }
             }
         }
     }
@@ -2080,20 +2219,25 @@ class HomeViewModel(
                     
                     var isUploaded = false
                     val email = googleEmail.value
-                    val token = if (email != null) getAccessToken(context, email) else null
-                    if (token != null) {
+                    if (!email.isNullOrEmpty()) {
                         updateQueueStatus(queueId, "Uploading PDF to Drive...")
                         val uploadParentId = folderId ?: driveFolderId.value
                         
-                        isUploaded = retryIO(times = 3) {
+                        val (uploaded, _) = uploadFileWithAuthRetry(
+                            context = context,
+                            email = email,
+                            initialToken = null,
+                            onStatusUpdate = { updateQueueStatus(queueId, it) }
+                        ) { token ->
                             GoogleDriveClient.uploadFile(
                                 accessToken = token,
-                                file = pdfFile,
+                                file = safeLocalCopy,
                                 mimeType = "application/pdf",
                                 fileName = finalFileName,
                                 parentId = uploadParentId
                             )
                         }
+                        isUploaded = uploaded
                     }
                     
                     val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
@@ -2111,6 +2255,7 @@ class HomeViewModel(
                     val id = database.documentDao().insertDocument(mergedEntity)
                     if (id != -1L) {
                         incrementUserScannedCount()
+                        updateQueueDocId(queueId, id.toInt())
                     }
                     
                     updateQueueStatus(queueId, "Completed - Merged successfully!")
@@ -2131,7 +2276,13 @@ class HomeViewModel(
         }
     }
 
-    fun uploadInBackground(context: Context, personName: String, documentType: String, format: UploadFormat) {
+    fun uploadInBackground(
+        context: Context,
+        personName: String,
+        documentType: String,
+        format: UploadFormat,
+        customTargetSizeKb: Int? = null
+    ) {
         val pending = _pendingDocuments.value.firstOrNull() ?: return
         _pendingDocuments.update { it.drop(1) } // dismiss dialog immediately to allow continued scanning
 
@@ -2166,7 +2317,8 @@ class HomeViewModel(
                 checkedPersonName,
                 checkedDocumentType,
                 format,
-                pageFiles = pending.pageFiles
+                pageFiles = pending.pageFiles,
+                customTargetSizeKb = customTargetSizeKb
             )
         }
     }
@@ -2175,6 +2327,14 @@ class HomeViewModel(
         _activeQueue.update { currentList ->
             currentList.map { item ->
                 if (item.id == id) item.copy(status = status) else item
+            }
+        }
+    }
+
+    private fun updateQueueDocId(id: String, docId: Int) {
+        _activeQueue.update { currentList ->
+            currentList.map { item ->
+                if (item.id == id) item.copy(docId = docId) else item
             }
         }
     }

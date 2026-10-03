@@ -1606,6 +1606,37 @@ fun MainScreen(
                                                 }
                                             }
                                             
+                                            if (isFailed && item.docId != null) {
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.End
+                                                ) {
+                                                    OutlinedButton(
+                                                        onClick = {
+                                                            viewModel.retryUpload(context, setOf(item.docId))
+                                                            Toast.makeText(context, "Resuming upload for ${item.personName}...", Toast.LENGTH_SHORT).show()
+                                                        },
+                                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Refresh,
+                                                            contentDescription = "Retry Upload",
+                                                            tint = MaterialTheme.colorScheme.error,
+                                                            modifier = Modifier.size(14.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "Retry Upload",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.error
+                                                        )
+                                                    }
+                                                }
+                                            }
+
                                             if (isProcessing) {
                                                 Spacer(modifier = Modifier.height(8.dp))
                                                 LinearProgressIndicator(
@@ -1644,9 +1675,10 @@ fun MainScreen(
                         if (selectedDocIds.isNotEmpty()) {
                             Row {
                                 IconButton(onClick = {
+                                    val count = selectedDocIds.size
                                     viewModel.retryUpload(context, selectedDocIds)
                                     selectedDocIds = setOf()
-                                    Toast.makeText(context, "Added to upload queue", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "Resuming upload for $count document(s)...", Toast.LENGTH_SHORT).show()
                                 }) {
                                     Icon(imageVector = Icons.Default.CloudUpload, contentDescription = "Upload to Drive", tint = MaterialTheme.colorScheme.primary)
                                 }
@@ -1737,7 +1769,7 @@ fun MainScreen(
                                     onRetryClick = if (!doc.isUploaded) {
                                         {
                                             viewModel.retryUpload(context, setOf(doc.id))
-                                            Toast.makeText(context, "Added to upload queue", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "Resuming upload: ${doc.fileName}", Toast.LENGTH_SHORT).show()
                                         }
                                     } else null
                                 )
@@ -3804,6 +3836,7 @@ fun MainScreen(
                 else UploadFormat.JPEG
             ) 
         }
+        var tempTargetSize by remember(doc) { mutableStateOf(targetSizeKb.toString()) }
 
         val presets = remember { listOf("Aadhaar Card", "PAN Card", "Voter ID", "Passport", "Driving License", "Marksheet", "Ration Card") }
 
@@ -3984,6 +4017,85 @@ fun MainScreen(
                         }
                     }
 
+                    // Target Output Size Control
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Target Output Size",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        val displaySize = tempTargetSize.toIntOrNull() ?: targetSizeKb
+                        Text(
+                            text = "Limit: ${displaySize} KB",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = tempTargetSize,
+                        onValueChange = { input -> 
+                            tempTargetSize = input.filter { it.isDigit() }
+                        },
+                        label = { Text("Target Size (KB)") },
+                        placeholder = { Text("e.g. 90") },
+                        trailingIcon = {
+                            Text(
+                                "KB",
+                                modifier = Modifier.padding(end = 12.dp),
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            focusedLabelColor = MaterialTheme.colorScheme.primary,
+                            unfocusedLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            cursorColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+
+                    val sizePresets = remember { listOf(50, 90, 100, 200, 500, 2000) }
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(sizePresets.size) { index ->
+                            val presetSize = sizePresets[index]
+                            val isSelected = tempTargetSize == presetSize.toString()
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                border = if (isSelected) null else androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.clickable { tempTargetSize = presetSize.toString() }
+                            ) {
+                                Text(
+                                    text = "${presetSize} KB",
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
                     // Quick category selectors
                     Text(
                         text = "Quick Document Presets",
@@ -4042,8 +4154,9 @@ fun MainScreen(
                                 UploadFormat.JPEG -> ".jpeg"
                                 UploadFormat.BOTH -> ".jpeg + .pdf"
                             }
+                            val parsedSize = tempTargetSize.toIntOrNull()?.coerceIn(10, 10000) ?: targetSizeKb
                             Text(
-                                "$displayBaseName$fileExt",
+                                "$displayBaseName$fileExt (Max: ${parsedSize} KB)",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.primary
@@ -4053,13 +4166,14 @@ fun MainScreen(
                 }
             },
             confirmButton = {
+                val finalTargetSize = tempTargetSize.toIntOrNull()?.coerceIn(10, 10000) ?: targetSizeKb
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Button(
                         onClick = {
-                            viewModel.uploadInBackground(context, tempPersonName, tempDocumentType, tempUploadFormat)
+                            viewModel.uploadInBackground(context, tempPersonName, tempDocumentType, tempUploadFormat, finalTargetSize)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
@@ -4068,7 +4182,7 @@ fun MainScreen(
                     }
                     Button(
                         onClick = {
-                            viewModel.confirmAndUpload(context, tempPersonName, tempDocumentType, tempUploadFormat)
+                            viewModel.confirmAndUpload(context, tempPersonName, tempDocumentType, tempUploadFormat, finalTargetSize)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)

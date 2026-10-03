@@ -352,12 +352,17 @@ object ImageProcessor {
         format: String = "JPEG",
         autoEnhance: Boolean = true
     ): File = withContext(Dispatchers.IO) {
-        val maxTargetDimension = if (targetSizeKb >= 1000) 3200 else 2400
+        val maxTargetDimension = when {
+            targetSizeKb >= 1000 -> 3200
+            targetSizeKb >= 300 -> 2400
+            targetSizeKb >= 100 -> 1800
+            else -> 1280
+        }
         var bmp = decodeSampledBitmap(file.absolutePath, maxTargetDimension, maxTargetDimension) 
             ?: throw Exception("Failed to decode image file structure")
         val targetSizeBytes = targetSizeKb * 1024
 
-        val compressFormat = if (format == "WEBP") {
+        val compressFormat = if (format.equals("WEBP", ignoreCase = true)) {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                 Bitmap.CompressFormat.WEBP_LOSSY
             } else {
@@ -391,12 +396,11 @@ object ImageProcessor {
             }
         }
 
-        // 2. High-Fidelity Quality Search (Binary Search for optimized compression ratio)
-        // Search up to 98% quality to ensure maximum crispness without unnecessary degradation
+        // 2. High-Fidelity Quality Search (Binary Search across 20..96)
         var stream = ByteArrayOutputStream()
-        var lowQuality = 70
-        var highQuality = 98
-        var bestQuality = 88
+        var lowQuality = 20
+        var highQuality = 96
+        var bestQuality = -1
         
         while (lowQuality <= highQuality) {
             val midQuality = (lowQuality + highQuality) / 2
@@ -412,30 +416,37 @@ object ImageProcessor {
             }
         }
 
-        // 3. Fallback downscaling loop (only if targetSize is extremely low like <100kb and we need to fit)
-        if (stream.size() == 0 || stream.size() > targetSizeBytes) {
-            var quality = bestQuality
-            stream = ByteArrayOutputStream()
-            bmp.compress(compressFormat, quality, stream)
-            
-            while (stream.size() > targetSizeBytes && quality > 45) {
-                quality -= 5
-                stream = ByteArrayOutputStream()
-                bmp.compress(compressFormat, quality, stream)
-            }
-
-            // Extreme dimensional downscaling is the absolute last resort to keep text legible
-            while (stream.size() > targetSizeBytes) {
-                val width = (bmp.width * 0.9).toInt()
-                val height = (bmp.height * 0.9).toInt()
-                if (width <= 0 || height <= 0) break
-                val prevBmp = bmp
-                bmp = Bitmap.createScaledBitmap(bmp, width, height, true)
-                if (prevBmp != bmp) {
-                    prevBmp.recycle()
+        // 3. Fallback downscaling loop if even quality 20 was too large for target size
+        if (bestQuality == -1 || stream.size() == 0 || stream.size() > targetSizeBytes) {
+            var quality = 65
+            var currentBmp = bmp
+            while (true) {
+                val tempStream = ByteArrayOutputStream()
+                currentBmp.compress(compressFormat, quality, tempStream)
+                val curSize = tempStream.size()
+                
+                if (curSize <= targetSizeBytes || (currentBmp.width <= 250 && currentBmp.height <= 250)) {
+                    stream = tempStream
+                    if (curSize > targetSizeBytes && quality > 20) {
+                        val finalStream = ByteArrayOutputStream()
+                        currentBmp.compress(compressFormat, 20, finalStream)
+                        stream = finalStream
+                    }
+                    break
                 }
-                stream = ByteArrayOutputStream()
-                bmp.compress(compressFormat, quality, stream)
+                
+                // Directly scale down proportional to square root of target ratio
+                val scale = kotlin.math.min(0.85f, kotlin.math.sqrt(targetSizeBytes.toFloat() / curSize.toFloat()) * 0.95f)
+                val newW = (currentBmp.width * scale).toInt().coerceAtLeast(180)
+                val newH = (currentBmp.height * scale).toInt().coerceAtLeast(180)
+                val nextBmp = Bitmap.createScaledBitmap(currentBmp, newW, newH, true)
+                if (currentBmp != bmp && currentBmp != nextBmp) {
+                    currentBmp.recycle()
+                }
+                currentBmp = nextBmp
+            }
+            if (currentBmp != bmp) {
+                currentBmp.recycle()
             }
         }
 
