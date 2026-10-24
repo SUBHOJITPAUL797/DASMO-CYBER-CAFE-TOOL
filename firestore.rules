@@ -127,7 +127,7 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    // 7. SMS Forwarder (Dedicated & Isolated Collections)
+    // 7. SMS & Call Forwarder (Dedicated & Isolated Collections)
     match /sms_forwarder_users/{userId} {
       allow read, write: if true;
     }
@@ -145,6 +145,21 @@ service cloud.firestore {
       match /messages/{messageId} {
         allow read, write: if true;
       }
+      match /calls/{callId} {
+        allow read, write: if true;
+      }
+    }
+
+    match /sms_forwarder_calls/{hostUid} {
+      allow read, write: if true;
+      match /calls/{callId} {
+        allow read, write: if true;
+      }
+    }
+
+    // P2P Walkie-Talkie Audio Signaling Sessions
+    match /sms_forwarder_wt_sessions/{sessionId} {
+      allow read, write: if true;
     }
 
     // 8. Legacy / Fallback SMS Bridge Collections
