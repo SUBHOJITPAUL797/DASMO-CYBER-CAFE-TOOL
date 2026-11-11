@@ -10,6 +10,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
@@ -125,6 +126,17 @@ fun BatchCameraScanScreen(
 
     val capturedPageUris = remember { mutableStateListOf<Uri>() }
     val capturedPageFiles = remember { mutableStateListOf<File>() }
+
+    BackHandler {
+        if (showReviewSheet) {
+            showReviewSheet = false
+        } else {
+            capturedPageFiles.forEach { file ->
+                try { file.delete() } catch (_: Exception) {}
+            }
+            onDismiss()
+        }
+    }
 
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     var camera: Camera? by remember { mutableStateOf(null) }
@@ -852,7 +864,8 @@ fun BatchCameraScanScreen(
                                             onClick = {
                                                 capturedPageUris.removeAt(index)
                                                 if (index < capturedPageFiles.size) {
-                                                    capturedPageFiles.removeAt(index)
+                                                    val removedFile = capturedPageFiles.removeAt(index)
+                                                    try { removedFile.delete() } catch (_: Exception) {}
                                                 }
                                             },
                                             modifier = Modifier

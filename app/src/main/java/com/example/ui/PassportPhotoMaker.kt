@@ -6,39 +6,48 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.pdf.PdfDocument
 import android.media.ExifInterface
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas as ComposeCanvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AddAPhoto
-import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import coil.compose.rememberAsyncImagePainter
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.unit.sp
+import com.example.data.ImageProcessor
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
@@ -47,48 +56,81 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.ByteBuffer
-import com.example.data.ImageProcessor
+
+private data class BgColorOption(val name: String, val color: Color)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PassportPhotoScreen(onBack: () -> Unit) {
-    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedColor by remember { mutableStateOf(Color.Blue) }
+    BackHandler { onBack() }
+
+    val bgPalette = remember {
+        listOf(
+            BgColorOption("Royal Blue", Color(0xFF0047AB)),
+            BgColorOption("Sky Blue", Color(0xFF38B6FF)),
+            BgColorOption("Pure White", Color(0xFFFFFFFF)),
+            BgColorOption("Light Gray", Color(0xFFE0E4E8)),
+            BgColorOption("Navy Blue", Color(0xFF0A1931)),
+            BgColorOption("Crimson", Color(0xFFC62828))
+        )
+    }
+
+    var selectedColor by remember { mutableStateOf(bgPalette[0].color) }
     var selectedDimension by remember { mutableStateOf("3.5 x 4.5 cm (Standard)") }
-    
+    var showGuideOverlay by remember { mutableStateOf(true) }
+
     var cropScale by remember { mutableFloatStateOf(1f) }
     var cropOffsetX by remember { mutableFloatStateOf(0f) }
     var cropOffsetY by remember { mutableFloatStateOf(0f) }
-    
+
     var originalBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    // Stores the transparent foreground cutout so changing background color is instant!
+    var cutoutForegroundBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    
+
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        selectedImageUri = uri
         uri?.let {
-            val bitmap = decodeSampledBitmapFromUri(context, it, 2048)
-            originalBitmap = bitmap
-            processedBitmap = null
-            cropScale = 1f
-            cropOffsetX = 0f
-            cropOffsetY = 0f
+            scope.launch {
+                val bitmap = withContext(Dispatchers.IO) {
+                    decodeSampledBitmapFromUri(context, it, 2048)
+                }
+                originalBitmap = bitmap
+                cutoutForegroundBitmap = null
+                cropScale = 1f
+                cropOffsetX = 0f
+                cropOffsetY = 0f
+            }
         }
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Passport Photo Maker") },
+                title = {
+                    Column {
+                        Text("Passport Photo Studio", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                        Text("AI Background Cutout & Print Grid", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (originalBitmap != null) {
+                        IconButton(onClick = { showGuideOverlay = !showGuideOverlay }) {
+                            Icon(
+                                imageVector = Icons.Default.GridOn,
+                                contentDescription = "Toggle Alignment Guide",
+                                tint = if (showGuideOverlay) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             )
@@ -100,193 +142,431 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             if (originalBitmap == null) {
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(200.dp)
+                        .height(260.dp)
                         .clickable { launcher.launch("image/*") },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
                 ) {
                     Column(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
-                        Icon(Icons.Default.AddAPhoto, contentDescription = "Select Photo", modifier = Modifier.size(48.dp))
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Select Photo from Gallery")
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primaryContainer),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.AddAPhoto,
+                                contentDescription = "Select Photo",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(34.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            "Select Portrait Photo",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Import from gallery to remove background, change studio backdrop color, and generate single or 8-photo printable sheets.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
                     }
                 }
             } else {
-                Box(
-                    modifier = Modifier
-                        .height(300.dp)
-                        .aspectRatio(
-                            when {
-                                selectedDimension.contains("2 x 2") || selectedDimension.contains("600 x 600") -> 1f
-                                else -> 413f / 531f
-                            }
-                        )
-                        .background(selectedColor)
-                        .clipToBounds()
-                        .pointerInput(Unit) {
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                cropScale = (cropScale * zoom).coerceIn(0.5f, 5f)
-                                cropOffsetX += pan.x / size.width
-                                cropOffsetY += pan.y / size.height
-                            }
-                        }
+                // Interactive Studio Canvas Card
+                Card(
+                    shape = RoundedCornerShape(24.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    if (processedBitmap != null) {
-                        Image(
-                            bitmap = processedBitmap!!.asImageBitmap(),
-                            contentDescription = "Selected Image",
-                            modifier = Modifier.fillMaxSize().graphicsLayer {
-                                scaleX = cropScale
-                                scaleY = cropScale
-                                translationX = cropOffsetX * size.width
-                                translationY = cropOffsetY * size.height
-                            },
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Image(
-                            bitmap = originalBitmap!!.asImageBitmap(),
-                            contentDescription = "Original Image",
-                            modifier = Modifier.fillMaxSize().graphicsLayer {
-                                scaleX = cropScale
-                                scaleY = cropScale
-                                translationX = cropOffsetX * size.width
-                                translationY = cropOffsetY * size.height
-                            },
-                            contentScale = ContentScale.Crop
-                        )
-                    }
-                }
-                
-                Text(
-                    text = "Pinch to zoom, drag to pan.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                Row {
-                    Button(onClick = { launcher.launch("image/*") }) {
-                        Text("Change Photo")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(onClick = { 
-                        if (!isProcessing && originalBitmap != null) {
-                            isProcessing = true
-                            removeBackground(originalBitmap!!, selectedColor, context) { resultBmp ->
-                                processedBitmap = resultBmp
-                                isProcessing = false
-                            }
-                        }
-                    }) {
-                        Text(if (isProcessing) "Processing..." else "Remove Background")
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                // Dimension Options
-                Text("Select Dimensions", style = MaterialTheme.typography.titleMedium)
-                val dimensions = listOf(
-                    "3.5 x 4.5 cm (Standard)",
-                    "2 x 2 inch (US)",
-                    "35 x 45 mm",
-                    "600 x 600 px"
-                )
-                dimensions.forEach { dim ->
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { selectedDimension = dim }
-                            .padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        RadioButton(
-                            selected = selectedDimension == dim,
-                            onClick = { selectedDimension = dim }
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(dim)
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                // Background Color Options
-                Text("Background Color", style = MaterialTheme.typography.titleMedium)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    val colors = listOf(Color.Blue, Color.White, Color.Red, Color.LightGray)
-                    colors.forEach { color ->
-                        val isSelected = selectedColor == color
                         Box(
                             modifier = Modifier
-                                .size(48.dp)
-                                .background(
-                                    if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                                    shape = RoundedCornerShape(10.dp)
-                                )
-                                .padding(if (isSelected) 3.dp else 0.dp)
-                                .background(color, shape = RoundedCornerShape(8.dp))
-                                .clickable { selectedColor = color }
-                        )
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(32.dp))
-                
-                Button(
-                    onClick = {
-                        if (!isSaving) {
-                            scope.launch {
-                                isSaving = true
-                                try {
-                                    val bmpToUse = processedBitmap ?: originalBitmap
-                                    if (bmpToUse != null) {
-                                        val jpgFile = generatePassportJpeg(
-                                            context, bmpToUse, selectedDimension, selectedColor,
-                                            cropScale, cropOffsetX, cropOffsetY
-                                        )
-                                        if (jpgFile != null) {
-                                            ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
-                                            Toast.makeText(context, "Saved to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
-                                        } else {
-                                            Toast.makeText(context, "Failed to save", Toast.LENGTH_SHORT).show()
-                                        }
+                                .height(290.dp)
+                                .aspectRatio(
+                                    when {
+                                        selectedDimension.contains("2 x 2") || selectedDimension.contains("600 x 600") -> 1f
+                                        else -> 413f / 531f
                                     }
-                                } finally {
-                                    isSaving = false
+                                )
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(selectedColor)
+                                .border(2.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                                .clipToBounds()
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        cropScale = (cropScale * zoom).coerceIn(0.5f, 5f)
+                                        cropOffsetX += pan.x / size.width
+                                        cropOffsetY += pan.y / size.height
+                                    }
+                                }
+                        ) {
+                            val displayBmp = cutoutForegroundBitmap ?: originalBitmap!!
+                            Image(
+                                bitmap = displayBmp.asImageBitmap(),
+                                contentDescription = "Passport Portrait Preview",
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        scaleX = cropScale
+                                        scaleY = cropScale
+                                        translationX = cropOffsetX * size.width
+                                        translationY = cropOffsetY * size.height
+                                    },
+                                contentScale = ContentScale.Crop
+                            )
+
+                            // Head & Shoulders Alignment Guide
+                            if (showGuideOverlay) {
+                                ComposeCanvas(modifier = Modifier.fillMaxSize()) {
+                                    val dashStroke = Stroke(
+                                        width = 1.5.dp.toPx(),
+                                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 10f), 0f)
+                                    )
+                                    val guideColor = Color.Cyan.copy(alpha = 0.7f)
+                                    // Center vertical line
+                                    drawLine(
+                                        color = guideColor,
+                                        start = Offset(size.width / 2f, 0f),
+                                        end = Offset(size.width / 2f, size.height),
+                                        strokeWidth = 1.dp.toPx(),
+                                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
+                                    )
+                                    // Head oval
+                                    val ovalW = size.width * 0.54f
+                                    val ovalH = size.height * 0.50f
+                                    drawOval(
+                                        color = guideColor,
+                                        topLeft = Offset((size.width - ovalW) / 2f, size.height * 0.12f),
+                                        size = Size(ovalW, ovalH),
+                                        style = dashStroke
+                                    )
+                                }
+                            }
+
+                            if (isProcessing) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black.copy(alpha = 0.55f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text("Removing Background...", color = Color.White, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                    }
                                 }
                             }
                         }
-                    },
-                    enabled = !isSaving,
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Pinch to zoom • Drag to align face inside oval",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Action Toolbar (Change Photo, Remove BG, Reset Zoom)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { launcher.launch("image/*") },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
+                            ) {
+                                Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Change", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            Button(
+                                onClick = {
+                                    if (!isProcessing && originalBitmap != null) {
+                                        if (cutoutForegroundBitmap != null) {
+                                            // Toggle back to original if already removed
+                                            cutoutForegroundBitmap = null
+                                        } else {
+                                            isProcessing = true
+                                            extractForegroundCutout(originalBitmap!!) { resultBmp ->
+                                                cutoutForegroundBitmap = resultBmp
+                                                isProcessing = false
+                                                if (resultBmp == null) {
+                                                    Toast.makeText(context, "Could not isolate subject", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = !isProcessing,
+                                modifier = Modifier.weight(1.3f),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (cutoutForegroundBitmap != null) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primary,
+                                    contentColor = if (cutoutForegroundBitmap != null) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onPrimary
+                                ),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (cutoutForegroundBitmap != null) Icons.Default.Undo else Icons.Default.AutoFixHigh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isProcessing) "Cutout..." else if (cutoutForegroundBitmap != null) "Restore BG" else "Remove BG",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    cropScale = 1f
+                                    cropOffsetX = 0f
+                                    cropOffsetY = 0f
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                            ) {
+                                Icon(Icons.Default.CenterFocusStrong, contentDescription = "Reset Crop", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Studio Backdrop Color Swatches Card
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(if (isSaving) "Saving..." else "Save as JPEG")
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Backdrop Studio Color", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = if (cutoutForegroundBitmap != null) "LIVE CUTOUT ACTIVE" else "TAP 'REMOVE BG' FIRST",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (cutoutForegroundBitmap != null) Color(0xFF00E676) else MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            bgPalette.forEach { option ->
+                                val isSelected = selectedColor == option.color
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.clickable { selectedColor = option.color }
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(44.dp)
+                                            .clip(CircleShape)
+                                            .background(option.color)
+                                            .border(
+                                                width = if (isSelected) 3.dp else 1.dp,
+                                                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                                                shape = CircleShape
+                                            ),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = option.name,
+                                                tint = if (option.color == Color.White || option.color == Color(0xFFE0E4E8)) Color.Black else Color.White,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = option.name.substringBefore(" "),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
+
+                // Dimension Selector Card
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("Official Size Standard", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        val dimensions = listOf(
+                            "3.5 x 4.5 cm (Standard)" to "413 × 531 px • India / UK / EU",
+                            "2 x 2 inch (US)" to "600 × 600 px • US Visa & Passport",
+                            "35 x 45 mm" to "413 × 531 px • ICAO Standard",
+                            "600 x 600 px" to "1:1 Square • Online Portals"
+                        )
+                        dimensions.forEach { (dim, subtitle) ->
+                            val isSelected = selectedDimension == dim
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { selectedDimension = dim }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { selectedDimension = dim },
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column {
+                                        Text(dim, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Export Buttons (Single Photo + 8-Photo Printable Sheet)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            if (!isSaving) {
+                                scope.launch {
+                                    isSaving = true
+                                    try {
+                                        val bmpToUse = cutoutForegroundBitmap ?: originalBitmap
+                                        if (bmpToUse != null) {
+                                            val jpgFile = generatePassportJpeg(
+                                                context, bmpToUse, selectedDimension, selectedColor,
+                                                cropScale, cropOffsetX, cropOffsetY
+                                            )
+                                            if (jpgFile != null) {
+                                                ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
+                                                Toast.makeText(context, "Saved Single Photo to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
+                                            } else {
+                                                Toast.makeText(context, "Failed to save photo", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } finally {
+                                        isSaving = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isSaving,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (isSaving) "Saving..." else "Save Single Passport Photo (JPEG)", fontWeight = FontWeight.Bold)
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            if (!isSaving) {
+                                scope.launch {
+                                    isSaving = true
+                                    try {
+                                        val bmpToUse = cutoutForegroundBitmap ?: originalBitmap
+                                        if (bmpToUse != null) {
+                                            val sheetFile = generatePassportSheetJpeg(
+                                                context, bmpToUse, selectedDimension, selectedColor,
+                                                cropScale, cropOffsetX, cropOffsetY
+                                            )
+                                            if (sheetFile != null) {
+                                                ImageProcessor.exportToPublicDocuments(context, sheetFile, sheetFile.name, "image/jpeg")
+                                                Toast.makeText(context, "Saved 8-Photo Print Sheet to Documents/Dasmo Scan/${sheetFile.name}", Toast.LENGTH_LONG).show()
+                                            } else {
+                                                Toast.makeText(context, "Failed to generate print sheet", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } finally {
+                                        isSaving = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isSaving,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                    ) {
+                        Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Save 8-Photo 4×6 Print Sheet (JPEG)", fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
 }
 
-private fun removeBackground(
+private fun extractForegroundCutout(
     bitmap: Bitmap,
-    bgColor: Color,
-    context: Context,
     onComplete: (Bitmap?) -> Unit
 ) {
     val options = SelfieSegmenterOptions.Builder()
@@ -301,14 +581,14 @@ private fun removeBackground(
                 val maskWidth = segmentationMask.width
                 val maskHeight = segmentationMask.height
 
-                // 1. Build mask bitmap from confidence buffer
+                // 1. Build alpha mask bitmap from confidence buffer
                 val maskBitmap = Bitmap.createBitmap(maskWidth, maskHeight, Bitmap.Config.ARGB_8888)
                 val maskPixels = IntArray(maskWidth * maskHeight)
                 mask.rewind()
                 for (i in 0 until (maskWidth * maskHeight)) {
                     val confidence = mask.float
-                    val alpha = if (confidence > 0.5f) {
-                        ((confidence - 0.5f) * 2f * 255f).toInt().coerceIn(0, 255)
+                    val alpha = if (confidence > 0.45f) {
+                        ((confidence - 0.45f) / 0.55f * 255f).toInt().coerceIn(0, 255)
                     } else {
                         0
                     }
@@ -316,11 +596,11 @@ private fun removeBackground(
                 }
                 maskBitmap.setPixels(maskPixels, 0, maskWidth, 0, 0, maskWidth, maskHeight)
 
-                // 2. Upscale mask to original photo dimensions for maximum crispness
+                // 2. Upscale mask to original photo dimensions for smooth edges
                 val scaledMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
                 maskBitmap.recycle()
 
-                // 3. Cutout foreground with alpha
+                // 3. Cutout foreground with transparent alpha so background color can be changed live!
                 val fgBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
                 val fgCanvas = Canvas(fgBitmap)
                 fgCanvas.drawBitmap(bitmap, 0f, 0f, null)
@@ -331,26 +611,67 @@ private fun removeBackground(
                 fgCanvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
                 scaledMask.recycle()
 
-                // 4. Composite high-resolution background color with crisp foreground person
-                val outputBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(outputBitmap)
-                canvas.drawColor(bgColor.toArgb())
-                canvas.drawBitmap(fgBitmap, 0f, 0f, null)
-                fgBitmap.recycle()
-
-                onComplete(outputBitmap)
+                onComplete(fgBitmap)
             } catch (e: Exception) {
                 e.printStackTrace()
                 onComplete(null)
             } finally {
-                try { segmenter.close() } catch (ex: Exception) {}
+                try { segmenter.close() } catch (_: Exception) {}
             }
         }
         .addOnFailureListener {
             it.printStackTrace()
-            try { segmenter.close() } catch (ex: Exception) {}
+            try { segmenter.close() } catch (_: Exception) {}
             onComplete(null)
         }
+}
+
+private fun renderSinglePassportBitmap(
+    bitmap: Bitmap,
+    dimension: String,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float
+): Bitmap {
+    val widthPixels: Int
+    val heightPixels: Int
+    when {
+        dimension.contains("3.5 x 4.5 cm") || dimension.contains("35 x 45 mm") -> {
+            widthPixels = 413
+            heightPixels = 531
+        }
+        dimension.contains("2 x 2 inch") || dimension.contains("600 x 600 px") -> {
+            widthPixels = 600
+            heightPixels = 600
+        }
+        else -> {
+            widthPixels = 413
+            heightPixels = 531
+        }
+    }
+
+    val outputBitmap = Bitmap.createBitmap(widthPixels, heightPixels, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(outputBitmap)
+    canvas.drawColor(bgColor.toArgb())
+
+    val baseScale = maxOf(
+        widthPixels.toFloat() / bitmap.width.toFloat(),
+        heightPixels.toFloat() / bitmap.height.toFloat()
+    )
+
+    val cx = (widthPixels - bitmap.width * baseScale) / 2f
+    val cy = (heightPixels - bitmap.height * baseScale) / 2f
+
+    val matrix = Matrix()
+    matrix.postScale(baseScale, baseScale)
+    matrix.postTranslate(cx, cy)
+
+    matrix.postScale(cropScale, cropScale, widthPixels / 2f, heightPixels / 2f)
+    matrix.postTranslate(cropOffsetX * widthPixels, cropOffsetY * heightPixels)
+
+    canvas.drawBitmap(bitmap, matrix, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+    return outputBitmap
 }
 
 private suspend fun generatePassportJpeg(
@@ -363,57 +684,75 @@ private suspend fun generatePassportJpeg(
     cropOffsetY: Float
 ): File? = withContext(Dispatchers.IO) {
     try {
-        val widthPixels: Int
-        val heightPixels: Int
-        when {
-            dimension.contains("3.5 x 4.5 cm") || dimension.contains("35 x 45 mm") -> {
-                widthPixels = 413
-                heightPixels = 531
-            }
-            dimension.contains("2 x 2 inch") -> {
-                widthPixels = 600
-                heightPixels = 600
-            }
-            dimension.contains("600 x 600 px") -> {
-                widthPixels = 600
-                heightPixels = 600
-            }
-            else -> {
-                widthPixels = 413
-                heightPixels = 531
-            }
-        }
-        
-        val outputBitmap = Bitmap.createBitmap(widthPixels, heightPixels, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(outputBitmap)
-        canvas.drawColor(bgColor.toArgb())
-        
-        val baseScale = maxOf(
-            widthPixels.toFloat() / bitmap.width.toFloat(),
-            heightPixels.toFloat() / bitmap.height.toFloat()
-        )
-        
-        val cx = (widthPixels - bitmap.width * baseScale) / 2f
-        val cy = (heightPixels - bitmap.height * baseScale) / 2f
-        
-        val matrix = android.graphics.Matrix()
-        matrix.postScale(baseScale, baseScale)
-        matrix.postTranslate(cx, cy)
-        
-        matrix.postScale(cropScale, cropScale, widthPixels / 2f, heightPixels / 2f)
-        matrix.postTranslate(cropOffsetX * widthPixels, cropOffsetY * heightPixels)
-        
-        canvas.drawBitmap(bitmap, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
-        
+        val outputBitmap = renderSinglePassportBitmap(bitmap, dimension, bgColor, cropScale, cropOffsetX, cropOffsetY)
         val dir = File(context.cacheDir, "passports")
         if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, "passport_${System.currentTimeMillis()}.jpg")
-        
+        val file = File(dir, "Passport_Single_${System.currentTimeMillis()}.jpg")
+
         FileOutputStream(file).use { out ->
-            outputBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+            outputBitmap.compress(Bitmap.CompressFormat.JPEG, 98, out)
         }
         outputBitmap.recycle()
-        
+        file
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    }
+}
+
+private suspend fun generatePassportSheetJpeg(
+    context: Context,
+    bitmap: Bitmap,
+    dimension: String,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float
+): File? = withContext(Dispatchers.IO) {
+    try {
+        val singleBmp = renderSinglePassportBitmap(bitmap, dimension, bgColor, cropScale, cropOffsetX, cropOffsetY)
+        // Standard 4x6 inch landscape print sheet at 300 DPI = 1800 x 1200 px (fits 8 standard passport photos in 4x2 grid)
+        val sheetW = 1800
+        val sheetH = 1200
+        val sheetBmp = Bitmap.createBitmap(sheetW, sheetH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(sheetBmp)
+        canvas.drawColor(0xFFFFFFFF.toInt())
+
+        val cols = 4
+        val rows = 2
+        val cellW = 390
+        val cellH = (cellW.toFloat() * singleBmp.height.toFloat() / singleBmp.width.toFloat()).toInt().coerceAtMost(520)
+        val scaledSingle = Bitmap.createScaledBitmap(singleBmp, cellW, cellH, true)
+        singleBmp.recycle()
+
+        val totalGridW = cols * cellW
+        val totalGridH = rows * cellH
+        val gapX = (sheetW - totalGridW) / (cols + 1)
+        val gapY = (sheetH - totalGridH) / (rows + 1)
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = 0xFFCCCCCC.toInt()
+            strokeWidth = 2f
+        }
+
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val left = gapX + c * (cellW + gapX)
+                val top = gapY + r * (cellH + gapY)
+                canvas.drawBitmap(scaledSingle, left.toFloat(), top.toFloat(), null)
+                canvas.drawRect(left.toFloat(), top.toFloat(), (left + cellW).toFloat(), (top + cellH).toFloat(), borderPaint)
+            }
+        }
+        scaledSingle.recycle()
+
+        val dir = File(context.cacheDir, "passports")
+        if (!dir.exists()) dir.mkdirs()
+        val file = File(dir, "Passport_8Sheet_${System.currentTimeMillis()}.jpg")
+        FileOutputStream(file).use { out ->
+            sheetBmp.compress(Bitmap.CompressFormat.JPEG, 98, out)
+        }
+        sheetBmp.recycle()
         file
     } catch (e: Exception) {
         e.printStackTrace()
@@ -479,4 +818,3 @@ private fun decodeSampledBitmapFromUri(context: Context, uri: Uri, maxDimension:
         null
     }
 }
-

@@ -25,6 +25,9 @@ import com.example.network.Part
 import com.example.network.GoogleDriveClient
 import com.example.network.GoogleDriveFolder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -832,28 +835,40 @@ class HomeViewModel(
                     val rootFolderId = driveFolderId.value
                     val rootNameStr = driveFolderName.value ?: "My Drive"
                     
-                    // 1. Fetch direct files from rootFolderId
-                    val direct = GoogleDriveClient.listFiles(obtainedToken, rootFolderId)
-                    direct.forEach { it.folderName = rootNameStr }
-                    
-                    // 2. Fetch immediate subfolders of rootFolderId
-                    val subFolderDefs = GoogleDriveClient.listFolders(obtainedToken, rootFolderId)
-                    
+                    // 1. Fetch direct files & immediate subfolders in parallel
+                    val (direct, subFolderDefs) = coroutineScope {
+                        val directDeferred = async(Dispatchers.IO) {
+                            GoogleDriveClient.listFiles(obtainedToken, rootFolderId).also { list ->
+                                list.forEach { it.folderName = rootNameStr }
+                            }
+                        }
+                        val subFoldersDeferred = async(Dispatchers.IO) {
+                            GoogleDriveClient.listFolders(obtainedToken, rootFolderId)
+                        }
+                        Pair(directDeferred.await(), subFoldersDeferred.await())
+                    }
+
                     val combined = mutableListOf<com.example.network.DriveFile>()
                     combined.addAll(direct)
-                    
-                    // 3. For each subfolder, retrieve its files (limit to at most 10 recent folders to prevent timeouts if placed in root)
+
+                    // 2. Fetch files across up to 10 recent subfolders concurrently
                     val limitedSubfolders = subFolderDefs.take(10)
-                    for (folder in limitedSubfolders) {
-                        try {
-                            val subFiles = GoogleDriveClient.listFiles(obtainedToken, folder.id)
-                            subFiles.forEach { it.folderName = folder.name }
-                            combined.addAll(subFiles)
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
+                    val subFilesLists = coroutineScope {
+                        limitedSubfolders.map { folder ->
+                            async(Dispatchers.IO) {
+                                try {
+                                    GoogleDriveClient.listFiles(obtainedToken, folder.id).also { list ->
+                                        list.forEach { it.folderName = folder.name }
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    emptyList()
+                                }
+                            }
+                        }.awaitAll()
                     }
-                    
+                    subFilesLists.forEach { combined.addAll(it) }
+
                     val sorted = combined.sortedByDescending { it.createdTime ?: "" }
                     _driveFiles.value = sorted
                 } else {
@@ -1413,8 +1428,21 @@ class HomeViewModel(
                     try { compressedFile.delete() } catch (e: Exception) {}
                 }
 
-                val finalJpgName = existingDoc.fileName.replace(".pdf", ".jpeg").replace(".PDF", ".jpeg")
-                val finalPdfName = existingDoc.fileName.replace(".jpeg", ".pdf").replace(".jpg", ".pdf")
+                val oldFileName = existingDoc.fileName
+                val oldBase = oldFileName.substringBeforeLast(".")
+                val existingSuffix = oldBase.substringAfterLast("_", "").takeIf { it.length == 4 && it.all { c -> c.isLetterOrDigit() } }
+                    ?: java.util.UUID.randomUUID().toString().take(4)
+
+                val safePersonName = checkedPersonName.replace(" ", "_").trim()
+                val safeDocumentType = checkedDocumentType.replace(" ", "_").trim()
+                val newBaseName = if (nameBeforeType.value) {
+                    "${safePersonName}_${safeDocumentType}_$existingSuffix"
+                } else {
+                    "${safeDocumentType}_${safePersonName}_$existingSuffix"
+                }
+
+                val finalJpgName = "$newBaseName.jpeg"
+                val finalPdfName = "$newBaseName.pdf"
                 val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
 
                 val updatedEntity = existingDoc.copy(
@@ -1439,7 +1467,8 @@ class HomeViewModel(
                         checkedDocumentType = checkedDocumentType,
                         format = format,
                         existingDocId = docId,
-                        pageFiles = if (tempPageFiles != null && !isId) tempPageFiles else null
+                        pageFiles = if (tempPageFiles != null && !isId) tempPageFiles else null,
+                        previousFileName = oldFileName
                     )
                 }
 
@@ -1729,6 +1758,7 @@ class HomeViewModel(
                 pending.pageFiles?.forEach { file ->
                     try { file.delete() } catch (e: Exception) {}
                 }
+                updatePublicFolderSize()
                 fetchDriveFiles(context)
             }
         }
@@ -1743,7 +1773,8 @@ class HomeViewModel(
         format: UploadFormat,
         existingDocId: Int? = null,
         pageFiles: List<File>? = null,
-        customTargetSizeKb: Int? = null
+        customTargetSizeKb: Int? = null,
+        previousFileName: String? = null
     ) {
         var obtainedToken: String? = null
         var finalJpgName = ""
@@ -1757,14 +1788,11 @@ class HomeViewModel(
             var existingDoc: DocumentEntity? = null
             if (isRetry) {
                 existingDoc = database.documentDao().getAllDocuments().first().find { it.id == existingDocId }
-                if (existingDoc != null) {
-                    if (existingDoc.fileName.endsWith(".pdf", ignoreCase = true)) {
-                        oldPdfName = existingDoc.fileName
-                        oldJpgName = existingDoc.fileName.substringBeforeLast(".") + ".jpeg"
-                    } else {
-                        oldJpgName = existingDoc.fileName
-                        oldPdfName = existingDoc.fileName.substringBeforeLast(".") + ".pdf"
-                    }
+                val refOldName = previousFileName ?: existingDoc?.fileName
+                if (refOldName != null) {
+                    val refBase = refOldName.substringBeforeLast(".")
+                    oldPdfName = "$refBase.pdf"
+                    oldJpgName = "$refBase.jpeg"
                 }
             }
 
@@ -1793,6 +1821,8 @@ class HomeViewModel(
                 try {
                     val sourceImage = if (pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()) {
                         pageFiles.first()
+                    } else if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                        ImageProcessor.getOrCreateThumbnailFile(context, compressedFile.absolutePath) ?: compressedFile
                     } else {
                         compressedFile
                     }
@@ -1823,9 +1853,11 @@ class HomeViewModel(
             if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
                 if (!safeLocalPdf.exists() || safeLocalPdf.length() == 0L) {
                     try {
-                        if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                        if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true) && (pageFiles == null || pageFiles.isEmpty())) {
                             // Already a valid PDF file on disk! Copy directly, never decode with BitmapFactory
-                            compressedFile.copyTo(safeLocalPdf, overwrite = true)
+                            if (compressedFile.absolutePath != safeLocalPdf.absolutePath) {
+                                compressedFile.copyTo(safeLocalPdf, overwrite = true)
+                            }
                         } else if (pageFiles != null && pageFiles.isNotEmpty()) {
                             ImageProcessor.convertToMultiPagePdf(pageFiles, safeLocalPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
                         } else if (safeLocalJpg.exists() && safeLocalJpg.length() > 0L) {
@@ -2004,6 +2036,7 @@ class HomeViewModel(
                     try { file.delete() } catch (ex: Exception) {}
                 }
             }
+            updatePublicFolderSize()
         }
     }
 
@@ -2564,10 +2597,10 @@ class HomeViewModel(
                 val options = BitmapFactory.Options()
                 options.inJustDecodeBounds = true
                 BitmapFactory.decodeFile(imageFile.absolutePath, options)
-                
+
                 var inSampleSize = 1
-                val reqWidth = 1024
-                val reqHeight = 1024
+                val reqWidth = 1400
+                val reqHeight = 1400
                 val height = options.outHeight
                 val width = options.outWidth
                 if (height > reqHeight || width > reqWidth) {
@@ -2579,19 +2612,61 @@ class HomeViewModel(
                 }
                 options.inSampleSize = inSampleSize
                 options.inJustDecodeBounds = false
-                
+
                 bitmap = BitmapFactory.decodeFile(imageFile.absolutePath, options)
                 if (bitmap == null) {
                     continuation.resume(DocumentAnalysisResult("Unknown", "Document"))
                     return@suspendCancellableCoroutine
                 }
-                val image = InputImage.fromBitmap(bitmap, 0)
-                
+
+                val rotationDegrees = try {
+                    val exif = android.media.ExifInterface(imageFile.absolutePath)
+                    when (exif.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, android.media.ExifInterface.ORIENTATION_NORMAL)) {
+                        android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                        android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                        android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                        else -> 0
+                    }
+                } catch (e: Exception) {
+                    0
+                }
+
+                val image = InputImage.fromBitmap(bitmap, rotationDegrees)
+
                 textRecognizer.process(image)
                     .addOnSuccessListener { visionText ->
                         if (continuation.isActive) {
-                            val fullText = visionText.text
-                            val result = try { extractLocalDetails(fullText) } catch (e: Exception) { DocumentAnalysisResult("Unknown", "Document") }
+                            // Sort OCR lines spatially (top-to-bottom with 16px row tolerance, then left-to-right)
+                            // so two-column Indian ID cards (Voter ID, Aadhaar, DL, Passport) read in true visual order.
+                            val sortedLines = visionText.textBlocks
+                                .flatMap { it.lines }
+                                .sortedWith { a, b ->
+                                    val boxA = a.boundingBox
+                                    val boxB = b.boundingBox
+                                    if (boxA != null && boxB != null) {
+                                        val topDiff = boxA.top - boxB.top
+                                        if (kotlin.math.abs(topDiff) <= 16) {
+                                            boxA.left.compareTo(boxB.left)
+                                        } else {
+                                            topDiff
+                                        }
+                                    } else {
+                                        0
+                                    }
+                                }
+                                .map { it.text.trim() }
+                                .filter { it.isNotEmpty() }
+
+                            val spatiallyOrderedText = if (sortedLines.isNotEmpty()) {
+                                sortedLines.joinToString("\n")
+                            } else {
+                                visionText.text
+                            }
+                            val result = try {
+                                extractLocalDetails(spatiallyOrderedText)
+                            } catch (e: Exception) {
+                                DocumentAnalysisResult("Unknown", "Document")
+                            }
                             continuation.resume(result)
                         }
                         try { bitmap?.recycle() } catch (ex: Exception) {}
@@ -2616,11 +2691,11 @@ class HomeViewModel(
     private fun extractLocalDetails(fullText: String): DocumentAnalysisResult {
         var personName = "Unknown"
         var documentType = "Document"
-        
+
         val lowercaseText = fullText.lowercase()
         val lines = fullText.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-        
-        // 1. Smart Scoring Based Document Detection
+
+        // 1. Multi-Signal Weighted Document Classification
         var aadhaarScore = 0
         var panScore = 0
         var voterScore = 0
@@ -2629,34 +2704,34 @@ class HomeViewModel(
         var marksheetScore = 0
         var rationScore = 0
 
-        if (Regex("\\b\\d{4}[\\s-]\\d{4}[\\s-]\\d{4}\\b").containsMatchIn(fullText)) aadhaarScore += 10
+        if (Regex("\\b\\d{4}[\\s-]\\d{4}[\\s-]\\d{4}\\b").containsMatchIn(fullText)) aadhaarScore += 12
         if (lowercaseText.contains("aadhaar") || lowercaseText.contains("aadhar") || lowercaseText.contains("adhar")) aadhaarScore += 10
-        if (lowercaseText.contains("unique identification") || lowercaseText.contains("uidai")) aadhaarScore += 5
-        if (fullText.contains("आधार")) aadhaarScore += 4
-        if (lowercaseText.contains("mera aadhaar") || lowercaseText.contains("meri pehchaan")) aadhaarScore += 4
+        if (lowercaseText.contains("unique identification") || lowercaseText.contains("uidai")) aadhaarScore += 8
+        if (fullText.contains("आधार")) aadhaarScore += 5
+        if (lowercaseText.contains("mera aadhaar") || lowercaseText.contains("meri pehchaan") || lowercaseText.contains("enrolment no")) aadhaarScore += 5
 
-        if (Regex("\\b[A-Za-z]{5}[0-9]{4}[A-Za-z]\\b").containsMatchIn(fullText)) panScore += 10
-        if (lowercaseText.contains("permanent account number")) panScore += 10
-        if (lowercaseText.contains("income tax department")) panScore += 10
+        if (Regex("\\b[A-Za-z]{5}[0-9]{4}[A-Za-z]\\b").containsMatchIn(fullText)) panScore += 12
+        if (lowercaseText.contains("permanent account number") || lowercaseText.contains("permanent account")) panScore += 10
+        if (lowercaseText.contains("income tax department") || lowercaseText.contains("income tax")) panScore += 10
 
-        if (lowercaseText.contains("election commission of india")) voterScore += 10
-        if (lowercaseText.contains("elector photo identity card") || lowercaseText.contains("epic")) voterScore += 10
-        if (lowercaseText.contains("voter id") || lowercaseText.contains("voter card")) voterScore += 10
-        if (Regex("\\b[A-Za-z]{3}[0-9]{7}\\b").containsMatchIn(fullText)) voterScore += 4 // EPIC
-        if (lowercaseText.contains("निर्वाचन आयोग")) voterScore += 5
+        if (lowercaseText.contains("election commission of india") || lowercaseText.contains("election commission")) voterScore += 12
+        if (lowercaseText.contains("elector photo identity card") || lowercaseText.contains("elector's photo identity") || lowercaseText.contains("identity card")) voterScore += 10
+        if (lowercaseText.contains("voter id") || lowercaseText.contains("voter card") || lowercaseText.contains("elector's name") || lowercaseText.contains("elector name")) voterScore += 10
+        if (Regex("\\b[A-Za-z]{3}[0-9]{7}\\b").containsMatchIn(fullText) || Regex("\\b[A-Za-z]{2}/\\d{2}/\\d{3}/\\d{6}\\b").containsMatchIn(fullText)) voterScore += 8
+        if (fullText.contains("निर्वाचन") || fullText.contains("मतदाता")) voterScore += 6
 
-        if (lowercaseText.contains("driving licence") || lowercaseText.contains("driving license")) dlScore += 10
-        if (lowercaseText.contains("dl no") || lowercaseText.contains("authorization to drive")) dlScore += 10
-        if (lowercaseText.contains("transport department")) dlScore += 5
+        if (lowercaseText.contains("driving licence") || lowercaseText.contains("driving license")) dlScore += 12
+        if (lowercaseText.contains("dl no") || lowercaseText.contains("authorization to drive") || lowercaseText.contains("motor vehicles")) dlScore += 10
+        if (lowercaseText.contains("transport department") || lowercaseText.contains("union of india")) dlScore += 6
 
-        if (lowercaseText.contains("republic of india") && lowercaseText.contains("passport")) passportScore += 10
-        if (lowercaseText.contains("passport no")) passportScore += 10
+        if (lowercaseText.contains("republic of india") && lowercaseText.contains("passport")) passportScore += 14
+        if (lowercaseText.contains("passport no") || lowercaseText.contains("given name") || Regex("P<[A-Z]{3}[A-Z<]{10,}").containsMatchIn(fullText)) passportScore += 12
 
-        if (lowercaseText.contains("marksheet") || lowercaseText.contains("mark sheet") || lowercaseText.contains("marks statement")) marksheetScore += 10
+        if (lowercaseText.contains("marksheet") || lowercaseText.contains("mark sheet") || lowercaseText.contains("marks statement")) marksheetScore += 12
         if (lowercaseText.contains("board of") && lowercaseText.contains("examination")) marksheetScore += 10
 
-        if (lowercaseText.contains("ration card") || lowercaseText.contains("smart ration card")) rationScore += 10
-        if (lowercaseText.contains("department of food") || lowercaseText.contains("food and civil supplies")) rationScore += 5
+        if (lowercaseText.contains("ration card") || lowercaseText.contains("smart ration card")) rationScore += 12
+        if (lowercaseText.contains("department of food") || lowercaseText.contains("food and civil supplies")) rationScore += 8
 
         val scores = mapOf(
             "Aadhaar Card" to aadhaarScore,
@@ -2673,117 +2748,272 @@ class HomeViewModel(
             documentType = bestMatch.key
         }
 
-        // 2. Exact on-device name extraction logic
+        // Helper: strips leading labels, honorifics, and punctuation from a candidate name line
+        fun cleanCandidateName(raw: String): String {
+            var s = raw.trim(':', '-', ' ', '=', '|', '।', '.', ',', '/', ';', '_')
+            // Strip any inline label prefix
+            val labelRegex = Regex("^(?:elector'?s?\\s*name|card\\s*holder'?s?\\s*name|holder'?s?\\s*name|name\\s*of\\s*holder|name\\s*of\\s*candidate|student'?s?\\s*name|full\\s*name|given\\s*name(?:\\(s\\))?|surname|name)\\s*[:\\-=|।.]*\\s*", RegexOption.IGNORE_CASE)
+            s = s.replace(labelRegex, "").trim(':', '-', ' ', '=', '|', '।', '.', ',', '/', ';', '_')
+            // Strip common Indian honorific titles at the start so the pure person name remains
+            val titleRegex = Regex("^(?:shri|smt|sri|kumari|km|mr|mrs|ms|dr|late)\\.?\\s+", RegexOption.IGNORE_CASE)
+            s = s.replace(titleRegex, "").trim()
+            // Keep only ASCII letters and spaces
+            s = s.replace(Regex("[^a-zA-Z\\s]"), " ").replace(Regex("\\s+"), " ").trim()
+            return s
+        }
+
+        fun isParentOrRelationLabel(lineLower: String): Boolean {
+            return lineLower.contains("father") ||
+                   lineLower.contains("mother") ||
+                   lineLower.contains("husband") ||
+                   lineLower.contains("spouse") ||
+                   lineLower.contains("wife") ||
+                   lineLower.contains("guardian") ||
+                   lineLower.contains("relation") ||
+                   lineLower.contains("care of") ||
+                   Regex("\\b(?:s/o|d/o|w/o|c/o|s/w/d)\\b").containsMatchIn(lineLower)
+        }
+
+        // 2. Document-Specific High-Precision Name Extraction
         var foundName = ""
-        
-        if (documentType == "PAN Card") {
+
+        // ─── A. PASSPORT (MRZ + Given Name / Surname Combiner) ───
+        if (documentType == "Passport" || Regex("P<[A-Z]{3}[A-Z<]{10,}").containsMatchIn(fullText)) {
+            // 1. Check ICAO MRZ line: P<INDPAUL<<SUBHOJIT<<<<<<<<<<<<
+            val mrzMatch = Regex("P<[A-Z]{3}([A-Z]+)<<([A-Z<]+)").find(fullText.replace(" ", ""))
+            if (mrzMatch != null) {
+                val surname = mrzMatch.groupValues[1].replace("<", " ").trim()
+                val givenNames = mrzMatch.groupValues[2].split("<").filter { it.isNotBlank() }.joinToString(" ").trim()
+                val combined = "$givenNames $surname".trim()
+                if (isValidLatinName(combined) && !isBlacklistedLine(combined)) {
+                    foundName = combined
+                }
+            }
+            // 2. Visual Inspection Zone fallback: Surname + Given Name(s)
+            if (foundName.isEmpty()) {
+                var surname = ""
+                var givenName = ""
+                for (i in lines.indices) {
+                    val low = lines[i].lowercase()
+                    if (low.contains("surname") && !low.contains("given")) {
+                        val after = cleanCandidateName(lines[i].substringAfterLast("surname", lines[i].substringAfterLast("Surname", "")))
+                        if (isValidLatinName(after) && !isBlacklistedLine(after)) {
+                            surname = after
+                        } else if (i + 1 < lines.size) {
+                            val next = cleanCandidateName(lines[i + 1])
+                            if (isValidLatinName(next) && !isBlacklistedLine(next)) surname = next
+                        }
+                    } else if (low.contains("given name")) {
+                        val after = cleanCandidateName(lines[i].substringAfterLast("name(s)", lines[i].substringAfterLast("name", "")))
+                        if (isValidLatinName(after) && !isBlacklistedLine(after)) {
+                            givenName = after
+                        } else if (i + 1 < lines.size) {
+                            val next = cleanCandidateName(lines[i + 1])
+                            if (isValidLatinName(next) && !isBlacklistedLine(next)) givenName = next
+                        }
+                    }
+                }
+                val combined = listOf(givenName, surname).filter { it.isNotBlank() }.joinToString(" ").trim()
+                if (isValidLatinName(combined) && !isBlacklistedLine(combined)) {
+                    foundName = combined
+                }
+            }
+        }
+
+        // ─── B. VOTER ID (Old & New EPIC Layouts) ───
+        if (foundName.isEmpty() && documentType == "Voter ID") {
             for (i in lines.indices) {
                 val lineLower = lines[i].lowercase()
-                if (lineLower.contains("name") && !lineLower.contains("father")) {
-                    if (i + 1 < lines.size) {
-                        val potentialName = lines[i + 1]
-                        if (isValidName(potentialName) && !isBlacklistedLine(potentialName)) {
-                            foundName = potentialName
+                // Strictly match the Elector's Name / Name field and NEVER Father's / Husband's / Mother's / Relation's Name
+                val isElectorNameField = (lineLower.contains("elector's name") ||
+                                          lineLower.contains("elector name") ||
+                                          lineLower.contains("electors name") ||
+                                          (lineLower.contains("name") && !isParentOrRelationLabel(lineLower)))
+                if (isElectorNameField && !isParentOrRelationLabel(lineLower)) {
+                    val idx = lineLower.lastIndexOf("name")
+                    if (idx != -1) {
+                        val rawAfter = lines[i].substring(idx + 4)
+                        val candidateAfter = cleanCandidateName(rawAfter)
+                        if (isValidLatinName(candidateAfter) && !isBlacklistedLine(candidateAfter)) {
+                            foundName = candidateAfter
                             break
                         }
                     }
-                }
-                if (foundName.isEmpty() && lineLower.contains("permanent account number")) {
-                    for(j in Math.max(0, i-4) until i) {
-                        val potentialName = lines[j]
-                        if (isValidName(potentialName) && potentialName.uppercase() == potentialName && !isBlacklistedLine(potentialName)) {
-                            foundName = potentialName
+                    // Look ahead up to 3 lines (in case line i+1 is ':' or Hindi/regional script, and line i+2 is the English name)
+                    for (offset in 1..3) {
+                        if (i + offset >= lines.size) break
+                        val lookaheadLine = lines[i + offset]
+                        val lookaheadLower = lookaheadLine.lowercase()
+                        // Stop looking ahead if we hit Father's/Husband's/Mother's Name or Sex/Age/DOB
+                        if (isParentOrRelationLabel(lookaheadLower) ||
+                            lookaheadLower.contains("sex") ||
+                            lookaheadLower.contains("age") ||
+                            lookaheadLower.contains("date of birth") ||
+                            lookaheadLower.contains("dob")) {
+                            break
+                        }
+                        val candidateNext = cleanCandidateName(lookaheadLine)
+                        if (isValidLatinName(candidateNext) && !isBlacklistedLine(candidateNext)) {
+                            foundName = candidateNext
+                            break
                         }
                     }
+                    if (foundName.isNotEmpty()) break
                 }
             }
-        } else if (documentType == "Voter ID") {
+        }
+
+        // ─── C. PAN CARD (Labeled & Unlabeled Positional Layouts) ───
+        if (foundName.isEmpty() && documentType == "PAN Card") {
             for (i in lines.indices) {
                 val lineLower = lines[i].lowercase()
-                if (lineLower.contains("elector's name") || lineLower.contains("name")) {
-                    val idx = lineLower.indexOf("name")
-                    val after = lines[i].substring(idx + 4).trim(':', '-', ' ', '=', '|', '।')
-                    if (after.length >= 3 && isValidName(after) && !isBlacklistedLine(after)) {
+                if (lineLower.contains("name") && !isParentOrRelationLabel(lineLower)) {
+                    val idx = lineLower.lastIndexOf("name")
+                    val after = cleanCandidateName(lines[i].substring(idx + 4))
+                    if (isValidLatinName(after) && !isBlacklistedLine(after)) {
                         foundName = after
                         break
-                    } else if (i + 1 < lines.size) {
-                        val nextLine = lines[i+1].trim(':', '-', ' ', '=', '|', '।')
-                        if (isValidName(nextLine) && !isBlacklistedLine(nextLine)) {
-                            foundName = nextLine
-                            break
+                    }
+                    for (offset in 1..2) {
+                        if (i + offset < lines.size) {
+                            val nextLine = lines[i + offset]
+                            if (isParentOrRelationLabel(nextLine.lowercase())) break
+                            val candidate = cleanCandidateName(nextLine)
+                            if (isValidLatinName(candidate) && !isBlacklistedLine(candidate)) {
+                                foundName = candidate
+                                break
+                            }
                         }
                     }
+                    if (foundName.isNotEmpty()) break
                 }
             }
-        } else if (documentType == "Aadhaar Card") {
+            // Positional fallback for older PAN cards without "Name" label:
+            // Collect valid uppercase English name lines above DOB / Permanent Account Number; first is Holder, second is Father
+            if (foundName.isEmpty()) {
+                val candidateNames = mutableListOf<String>()
+                for (line in lines) {
+                    val low = line.lowercase()
+                    if (low.contains("permanent account") || low.contains("date of birth") || Regex("\\b\\d{2}/\\d{2}/\\d{4}\\b").containsMatchIn(line)) {
+                        break
+                    }
+                    val cleaned = cleanCandidateName(line)
+                    if (isValidLatinName(cleaned) && !isBlacklistedLine(cleaned) && !isParentOrRelationLabel(low)) {
+                        candidateNames.add(cleaned)
+                    }
+                }
+                if (candidateNames.isNotEmpty()) {
+                    foundName = candidateNames.first()
+                }
+            }
+        }
+
+        // ─── D. AADHAAR CARD (Bilingual English Line Above DOB / YOB / S/O) ───
+        if (foundName.isEmpty() && documentType == "Aadhaar Card") {
             for (i in lines.indices) {
                 val lineLower = lines[i].lowercase()
-                if (lineLower.contains("dob") || lineLower.contains("year of birth") || lineLower.contains("yob")) {
-                    if (i - 1 >= 0) {
-                        val prev = lines[i-1]
-                        if (isValidName(prev) && !isBlacklistedLine(prev)) {
-                            foundName = prev
-                            break
+                if (lineLower.contains("dob") ||
+                    lineLower.contains("date of birth") ||
+                    lineLower.contains("year of birth") ||
+                    lineLower.contains("yob") ||
+                    Regex("\\b\\d{2}/\\d{2}/\\d{4}\\b").containsMatchIn(lines[i])) {
+                    // Search 1 to 3 lines upward for the English Latin name (skipping regional script lines)
+                    for (up in 1..3) {
+                        if (i - up >= 0) {
+                            val prevLine = lines[i - up]
+                            if (isParentOrRelationLabel(prevLine.lowercase())) continue
+                            val candidate = cleanCandidateName(prevLine)
+                            if (isValidLatinName(candidate) && !isBlacklistedLine(candidate)) {
+                                foundName = candidate
+                                break
+                            }
                         }
                     }
-                    if (i - 2 >= 0 && foundName.isEmpty()) {
-                         val prev = lines[i-2]
-                         if (isValidName(prev) && !isBlacklistedLine(prev)) {
-                             foundName = prev
-                             break
-                         }
+                    if (foundName.isNotEmpty()) break
+                }
+            }
+            // Secondary Aadhaar check: line immediately above S/O, D/O, W/O, C/O
+            if (foundName.isEmpty()) {
+                for (i in 1 until lines.size) {
+                    val lineLower = lines[i].lowercase()
+                    if (Regex("\\b(?:s/o|d/o|w/o|c/o)\\b").containsMatchIn(lineLower)) {
+                        for (up in 1..2) {
+                            if (i - up >= 0) {
+                                val candidate = cleanCandidateName(lines[i - up])
+                                if (isValidLatinName(candidate) && !isBlacklistedLine(candidate)) {
+                                    foundName = candidate
+                                    break
+                                }
+                            }
+                        }
+                        if (foundName.isNotEmpty()) break
                     }
                 }
             }
         }
 
+        // ─── E. UNIVERSAL LABELED FIELD SEARCH (DL, Marksheet, Ration Card, Fallback) ───
         if (foundName.isEmpty()) {
-            val nameIndicators = listOf("elector's name", "name", "full name", "नाम", "holder name", "name of holder", "card holder", "given name", "given name(s)", "surname")
+            val nameIndicators = listOf(
+                "elector's name", "elector name", "card holder name", "holder's name", "holder name",
+                "name of holder", "candidate's name", "name of candidate", "student's name", "student name",
+                "full name", "given name(s)", "given name", "name"
+            )
             for (i in lines.indices) {
                 val lineLower = lines[i].lowercase()
+                if (isParentOrRelationLabel(lineLower)) continue
+
                 for (ind in nameIndicators) {
-                    if (lineLower.startsWith(ind) || lineLower.contains("$ind:") || lineLower.contains("$ind :") || lineLower.contains("$ind=")) {
-                        var afterInd = ""
+                    if (lineLower.startsWith(ind) || lineLower.contains("$ind:") || lineLower.contains("$ind :") || lineLower.contains("$ind-") || lineLower.contains("$ind =")) {
                         val idx = lineLower.indexOf(ind)
                         if (idx != -1) {
-                            afterInd = lines[i].substring(idx + ind.length).trim(':', '-', ' ', '=', '।', '/', '.')
-                        }
-                        if (afterInd.length >= 3 && isValidName(afterInd) && !isBlacklistedLine(afterInd)) {
-                            foundName = afterInd
-                            break
-                        } else if (i + 1 < lines.size) {
-                            val nextLine = lines[i + 1].trim()
-                            if (nextLine.length >= 3 && isValidName(nextLine) && !isBlacklistedLine(nextLine)) {
-                                foundName = nextLine
+                            val afterInd = cleanCandidateName(lines[i].substring(idx + ind.length))
+                            if (isValidLatinName(afterInd) && !isBlacklistedLine(afterInd)) {
+                                foundName = afterInd
                                 break
                             }
                         }
+                        for (offset in 1..2) {
+                            if (i + offset < lines.size) {
+                                val nextLine = lines[i + offset]
+                                if (isParentOrRelationLabel(nextLine.lowercase())) break
+                                val candidate = cleanCandidateName(nextLine)
+                                if (isValidLatinName(candidate) && !isBlacklistedLine(candidate)) {
+                                    foundName = candidate
+                                    break
+                                }
+                            }
+                        }
+                        if (foundName.isNotEmpty()) break
                     }
                 }
                 if (foundName.isNotEmpty()) break
             }
         }
-        
+
+        // ─── F. POSITIONAL UPPERCASE / TITLECASE NAME HEURISTIC FALLBACK ───
         if (foundName.isEmpty()) {
             for (line in lines) {
-                val cleaned = line.replace(Regex("[^a-zA-Z\\s]"), "").trim()
-                val words = cleaned.split("\\s+".toRegex())
-                if ((words.size in 2..4) && (cleaned.uppercase() == cleaned) && cleaned.length >= 5) {
-                    if (!isBlacklistedLine(cleaned) && isValidName(line)) {
-                        foundName = line
+                if (isParentOrRelationLabel(line.lowercase())) continue
+                val cleaned = cleanCandidateName(line)
+                val words = cleaned.split("\\s+".toRegex()).filter { it.isNotBlank() }
+                if (words.size in 2..4 && cleaned.length in 5..36) {
+                    if (isValidLatinName(cleaned) && !isBlacklistedLine(cleaned)) {
+                        foundName = cleaned
                         break
                     }
                 }
             }
         }
-        
+
         if (foundName.isNotEmpty()) {
-            personName = foundName.replace(Regex("[^a-zA-Z\\s]"), "").trim()
-            personName = personName.split("\\s+".toRegex()).joinToString(" ") { 
-                it.lowercase().replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase() else char.toString() } 
-            }
+            personName = foundName.split("\\s+".toRegex())
+                .filter { it.isNotBlank() }
+                .joinToString(" ") { word ->
+                    word.lowercase().replaceFirstChar { char -> char.titlecase() }
+                }
         }
-        
+
         val sanName = sanitizePersonName(personName)
         val sanType = sanitizeDocumentType(documentType, fullText)
         return DocumentAnalysisResult(personName = sanName, documentType = sanType)
@@ -2796,19 +3026,21 @@ class HomeViewModel(
         }
 
         val prefixes = listOf(
-            "card holder name", "cardholder name", "name of holder", "holder name", 
-            "card holder", "cardholder", "head of family", "relation name", "full name", 
+            "card holder name", "cardholder name", "name of holder", "holder name",
+            "card holder", "cardholder", "head of family", "relation name", "full name",
             "father's name", "father name", "mother's name", "mother name", "husband's name",
-            "husband name", "नाम", "name", "elector's name", "elector name"
+            "husband name", "नाम", "elector's name", "elector name", "electors name", "name"
         )
-        
+
         for (pref in prefixes) {
             val lowerCleaned = cleaned.lowercase()
             if (lowerCleaned.startsWith(pref)) {
-                cleaned = cleaned.substring(pref.length).trim(':', '-', ' ', '=', '।', '/', ',')
+                cleaned = cleaned.substring(pref.length).trim(':', '-', ' ', '=', '।', '/', ',', '.')
                 break
             }
         }
+
+        cleaned = cleaned.replace(Regex("^(?:shri|smt|sri|kumari|km|mr|mrs|ms|dr|late)\\.?\\s+", RegexOption.IGNORE_CASE), "").trim()
 
         val nameLower = cleaned.lowercase()
         if (nameLower.isEmpty() || nameLower == "unknown") {
@@ -2816,29 +3048,29 @@ class HomeViewModel(
         }
 
         val blacklist = listOf(
-            "card holder", "cardholder", "holder name", "name of holder", "head of family", "father's name", "father name", "father", "mother", "mother's name", "husband", "spouse", "parent", 
-            "voter id", "aadhaar", "aadhar", "pan card", "passport", "driving license", "driving licence", "marksheet", "ration card", 
-            "signature", "photo", "thumb impression", "impression", "relation", "relationship", "address", "government", "government of india", 
-            "income tax", "department", "election commission", "male", "female", "transgender", "yob:", "dob:", "date of birth", "place of birth", 
-            "authority", "uidai", "epic", "serial no", "card no", "unique", "identification", "republic of india", "resident of", "to permanent", 
-            "permanent account", "tax department", "transport department", "school board", "elector photo", "marks statement", "roll no", "examination"
+            "card holder", "cardholder", "holder name", "name of holder", "head of family", "father's name", "father name", "father", "mother", "mother's name", "husband", "spouse", "parent",
+            "voter id", "aadhaar", "aadhar", "pan card", "passport", "driving license", "driving licence", "marksheet", "ration card",
+            "signature", "photo", "thumb impression", "impression", "relation", "relationship", "address", "government", "government of india",
+            "income tax", "department", "election commission", "male", "female", "transgender", "sex", "sex male", "sex female", "yob", "dob", "date of birth", "place of birth",
+            "authority", "uidai", "epic", "serial no", "card no", "unique", "identification", "republic of india", "resident of", "to permanent",
+            "permanent account", "tax department", "transport department", "school board", "elector photo", "identity card", "marks statement", "roll no", "examination"
         )
 
         for (black in blacklist) {
-            if (nameLower == black || nameLower.startsWith(black) || (nameLower.length <= black.length + 4 && nameLower.contains(black))) {
+            if (nameLower == black || nameLower.startsWith("$black ") || (nameLower.length <= black.length + 4 && nameLower.contains(black))) {
                 return "Unknown"
             }
         }
 
-        if (cleaned.any { it.isDigit() }) return "Unknown"
-        val invalidChars = listOf('@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '=', '[', ']', '{', '}', ';', ':', '"', '<', '>', '/', '\\', '|')
-        if (cleaned.any { it in invalidChars }) return "Unknown"
-        
-        val words = cleaned.split("\\s+".toRegex())
-        if (words.size > 5) return "Unknown"
+        if (!isValidLatinName(cleaned)) return "Unknown"
+
+        val words = cleaned.split("\\s+".toRegex()).filter { it.isNotBlank() }
+        if (words.isEmpty() || words.size > 5) return "Unknown"
         if (cleaned.length <= 2) return "Unknown"
 
-        return cleaned
+        return words.joinToString(" ") { word ->
+            word.lowercase().replaceFirstChar { c -> c.titlecase() }
+        }
     }
 
     private fun sanitizeDocumentType(detectedType: String, keywordText: String = ""): String {
@@ -2871,11 +3103,11 @@ class HomeViewModel(
             return "Voter ID"
         }
 
-        return detectedType.trim().split(" ").joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }
+        return detectedType.trim().split(" ").filter { it.isNotBlank() }.joinToString(" ") { it.replaceFirstChar { c -> c.uppercase() } }.ifEmpty { "Document" }
     }
 
     private fun isBlacklistedLine(line: String): Boolean {
-        val lower = line.lowercase()
+        val lower = line.lowercase().trim()
         if (lower.length < 3) return true
         val blacklists = listOf(
             "government", "india", "income tax", "permanent", "department", "election", "commission", "signature", "card",
@@ -2884,20 +3116,62 @@ class HomeViewModel(
             "delhi", "mumbai", "kolkata", "chennai", "road", "street", "lane", "floor", "house", "flat", "office", "post", "bazar", "nagar",
             "city", "town", "village", "taluk", "tehsil", "dist", "pin", "code", "phone", "mobile", "tel", "email", "web", "site",
             "issue", "expiry", "holder", "assembly", "elector", "marksheet", "certificate", "examined", "roll", "marks", "grades",
-            "uidai", "mera aadhaar", "meri pehchaan", "sex", "male", "female", "gender", "age", "dob", "yob"
+            "uidai", "mera aadhaar", "meri pehchaan", "sex", "male", "female", "transgender", "gender", "age", "dob", "yob", "blood", "group",
+            "valid", "till", "from", "non", "transport", "enrolment", "download", "virtual", "vid", "west", "bengal", "maharashtra", "bihar", "uttar", "pradesh"
         )
-        return blacklists.any { Regex("\\b$it\\b").containsMatchIn(lower) } || 
-               lower.contains("help@") || lower.contains("www.") || 
-               lower.contains("elector's") || lower.contains("father's")
+        return blacklists.any { Regex("\\b$it\\b").containsMatchIn(lower) } ||
+               lower.contains("help@") || lower.contains("www.") ||
+               lower.contains("elector's") || lower.contains("father's") || lower.contains("mother's") || lower.contains("husband's")
     }
 
-    private fun isValidName(line: String): Boolean {
-        if (line.any { it.isDigit() }) return false
+    /**
+     * Validates that a candidate name consists of English Latin letters (a-z, A-Z)
+     * so regional script lines (Hindi/Bengali/Tamil) are skipped in favor of the English name line.
+     */
+    private fun isValidLatinName(line: String): Boolean {
+        val trimmed = line.trim()
+        if (trimmed.length < 3 || trimmed.length > 42) return false
+        if (trimmed.any { it.isDigit() }) return false
         val invalidChars = listOf('@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '=', '[', ']', '{', '}', ';', ':', '"', '<', '>', '/', '\\', '|')
-        if (line.any { it in invalidChars }) return false
-        val letters = line.filter { it.isLetter() }.length
-        val total = line.length
-        return total > 0 && (letters.toDouble() / total.toDouble()) > 0.6 && line.trim().length > 2
+        if (trimmed.any { it in invalidChars }) return false
+
+        val asciiLetters = trimmed.count { it in 'a'..'z' || it in 'A'..'Z' }
+        val nonSpaceChars = trimmed.count { !it.isWhitespace() }
+        if (nonSpaceChars == 0 || asciiLetters < 3) return false
+
+        // Require at least 80% of non-whitespace characters to be Latin ASCII letters
+        if (asciiLetters.toDouble() / nonSpaceChars.toDouble() < 0.80) return false
+
+        // Require at least one vowel in the name to reject random OCR consonant noise like "XBCDF"
+        val hasVowel = trimmed.any { it.lowercaseChar() in "aeiouy" }
+        return hasVowel
+    }
+
+    fun deleteSelectedDocuments(docIds: Set<Int>) {
+        if (docIds.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val allDocs = database.documentDao().getAllDocuments().first()
+                val toDelete = allDocs.filter { it.id in docIds }
+                for (doc in toDelete) {
+                    try {
+                        val file = File(doc.localFilePath)
+                        if (file.exists()) file.delete()
+                        val basePath = doc.localFilePath.substringBeforeLast(".")
+                        val siblingJpg = File("$basePath.jpeg")
+                        if (siblingJpg.exists()) siblingJpg.delete()
+                        val siblingPdf = File("$basePath.pdf")
+                        if (siblingPdf.exists()) siblingPdf.delete()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                database.documentDao().deleteDocumentsByIds(docIds.toList())
+                updatePublicFolderSize()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun clearAllData(deletePublicFiles: Boolean = false) {

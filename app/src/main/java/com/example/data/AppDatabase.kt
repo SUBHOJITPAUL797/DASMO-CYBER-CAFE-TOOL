@@ -26,6 +26,12 @@ interface DocumentDao {
     @Update
     suspend fun updateDocument(document: DocumentEntity)
 
+    @Query("DELETE FROM documents WHERE id = :id")
+    suspend fun deleteDocumentById(id: Int)
+
+    @Query("DELETE FROM documents WHERE id IN (:ids)")
+    suspend fun deleteDocumentsByIds(ids: List<Int>)
+
     @Query("DELETE FROM documents")
     suspend fun deleteAllDocuments()
 }

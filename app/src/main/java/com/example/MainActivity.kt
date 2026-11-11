@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.material3.Checkbox
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -38,6 +39,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
@@ -190,6 +192,8 @@ fun MainScreen(
     var isFabExpanded by remember { mutableStateOf(false) }
     var activeTab by remember { mutableStateOf("DASHBOARD") }
     var searchQuery by remember { mutableStateOf("") }
+    var capturesSearchQuery by remember { mutableStateOf("") }
+    var capturesFilterMode by remember { mutableStateOf("ALL") } // "ALL", "SYNCED", "PENDING"
     var selectedDocIds by remember { mutableStateOf(setOf<Int>()) }
     var showMergeDialog by remember { mutableStateOf(false) }
     var mergeFileName by remember { mutableStateOf("") }
@@ -202,9 +206,18 @@ fun MainScreen(
     val publicFolderSize by viewModel.publicFolderSize.collectAsStateWithLifecycle()
     val storageLimitMb by viewModel.storageLimitMb.collectAsStateWithLifecycle()
     val batchPagesPerDoc by viewModel.batchPagesPerDoc.collectAsStateWithLifecycle()
+    var sessionBatchPagesPerDoc by remember(batchPagesPerDoc) { mutableIntStateOf(batchPagesPerDoc) }
     var selectedPreviewDoc by remember { mutableStateOf<com.example.data.DocumentEntity?>(null) }
     val scope = rememberCoroutineScope()
     val batchVerificationGroups by viewModel.batchVerificationGroups.collectAsStateWithLifecycle()
+
+    BackHandler(enabled = selectedDocIds.isNotEmpty() || isFabExpanded || activeTab != "DASHBOARD") {
+        when {
+            selectedDocIds.isNotEmpty() -> selectedDocIds = emptySet()
+            isFabExpanded -> isFabExpanded = false
+            activeTab != "DASHBOARD" -> activeTab = "DASHBOARD"
+        }
+    }
 
     // Google Sign-In setup
     val gso = remember {
@@ -366,7 +379,7 @@ fun MainScreen(
             val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
             scanResult?.pages?.let { pages ->
                 val imageUris = pages.map { it.imageUri }
-                viewModel.processBatchScannedImages(imageUris, batchPagesPerDoc)
+                viewModel.processBatchScannedImages(imageUris, sessionBatchPagesPerDoc)
             }
         }
     }
@@ -579,9 +592,13 @@ fun MainScreen(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                    .size(42.dp)
+                                    .claySurface(
+                                        baseColor = MaterialTheme.colorScheme.primaryContainer,
+                                        accentColor = MaterialTheme.colorScheme.primary,
+                                        cornerRadius = 14.dp,
+                                        bevelDepth = 3.dp
+                                    ),
                                 contentAlignment = Alignment.Center
                             ) {
                                 androidx.compose.foundation.Image(
@@ -594,41 +611,68 @@ fun MainScreen(
                                 Text(
                                     text = "Dasmo Cyber Tool",
                                     style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
+                                    fontWeight = FontWeight.ExtraBold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.clickable { activeTab = "SYNC" }
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .size(6.dp)
+                                            .size(8.dp)
                                             .clip(CircleShape)
-                                            .background(if (googleEmail != null) Color(0xFF4CAF50) else Color(0xFF2C2F36))
+                                            .background(if (googleEmail != null) Color(0xFF00E676) else Color(0xFFFFB300))
                                     )
                                     Text(
-                                        text = if (googleEmail != null) "DRIVE SYNC ON" else "DRIVE DISCONNECTED",
+                                        text = if (googleEmail != null) "DRIVE SYNC ON" else "LOCAL MODE • TAP TO LINK",
                                         style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        letterSpacing = androidx.compose.ui.unit.TextUnit.Unspecified
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (googleEmail != null) Color(0xFF00E676) else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
                             }
                         }
-                        IconButton(
-                            onClick = { activeTab = "SETTINGS" },
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Settings,
-                                contentDescription = "Settings",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .claySurface(
+                                        baseColor = MaterialTheme.colorScheme.primaryContainer,
+                                        accentColor = MaterialTheme.colorScheme.primary,
+                                        cornerRadius = 12.dp,
+                                        bevelDepth = 2.5.dp
+                                    )
+                                    .clickable { showSizeDialog = true }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = "${imageFormat.uppercase()} • ${targetSizeKb}KB",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(
+                                onClick = { activeTab = "SETTINGS" },
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .claySurface(
+                                        baseColor = MaterialTheme.colorScheme.surfaceVariant,
+                                        accentColor = MaterialTheme.colorScheme.primary,
+                                        cornerRadius = 20.dp,
+                                        bevelDepth = 2.5.dp
+                                    )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = "Settings",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
                 }
@@ -637,126 +681,79 @@ fun MainScreen(
         bottomBar = {
             Surface(
                 tonalElevation = 8.dp,
+                shadowElevation = 6.dp,
                 color = MaterialTheme.colorScheme.surface,
                 modifier = Modifier.navigationBarsPadding()
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 10.dp),
+                        .padding(vertical = 8.dp, horizontal = 4.dp),
                     horizontalArrangement = Arrangement.SpaceAround,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Dashboard Tab
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable { activeTab = "DASHBOARD" }
-                            .padding(8.dp)
-                            .weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Home,
-                            contentDescription = "Dashboard",
-                            tint = if (activeTab == "DASHBOARD") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "HOME",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (activeTab == "DASHBOARD") FontWeight.Bold else FontWeight.Medium,
-                            color = if (activeTab == "DASHBOARD") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    val navItems = buildList {
+                        add(Triple("DASHBOARD", "HOME", Icons.Default.Home))
+                        add(Triple("FILES", "DRIVE", Icons.Default.CloudDone))
+                        add(Triple("FAB_SPACER", "", Icons.Default.Add))
+                        add(Triple("CAPTURES", "CAPTURES", Icons.Default.FolderSpecial))
+                        add(Triple("SYNC", "SYNC", Icons.Default.Sync))
+                        if (isAdmin) {
+                            add(Triple("APPROVALS", "ADMIN", Icons.Default.AdminPanelSettings))
+                        }
                     }
 
-                    // Files Tab
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable { activeTab = "FILES" }
-                            .padding(8.dp)
-                            .weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.List,
-                            contentDescription = "Files",
-                            tint = if (activeTab == "FILES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "DRIVE",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (activeTab == "FILES") FontWeight.Bold else FontWeight.Medium,
-                            color = if (activeTab == "FILES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    // Space for center FAB
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    // Captures Tab
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable { activeTab = "CAPTURES" }
-                            .padding(8.dp)
-                            .weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.CheckCircle,
-                            contentDescription = "Captures",
-                            tint = if (activeTab == "CAPTURES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "CAPTURES",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (activeTab == "CAPTURES") FontWeight.Bold else FontWeight.Medium,
-                            color = if (activeTab == "CAPTURES") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    // Sync Tab
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable { activeTab = "SYNC" }
-                            .padding(8.dp)
-                            .weight(1f)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Sync",
-                            tint = if (activeTab == "SYNC") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "SYNC",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (activeTab == "SYNC") FontWeight.Bold else FontWeight.Medium,
-                            color = if (activeTab == "SYNC") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (isAdmin) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier
-                                .clickable { activeTab = "APPROVALS" }
-                                .padding(8.dp)
-                                .weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = "Approvals",
-                                tint = if (activeTab == "APPROVALS") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "ADMIN",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = if (activeTab == "APPROVALS") FontWeight.Bold else FontWeight.Medium,
-                                color = if (activeTab == "APPROVALS") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                    navItems.forEach { (tabId, label, icon) ->
+                        if (tabId == "FAB_SPACER") {
+                            if (activeTab == "DASHBOARD") {
+                                Spacer(modifier = Modifier.weight(0.9f))
+                            }
+                        } else {
+                            val isSelected = activeTab == tabId
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .clickable {
+                                        isFabExpanded = false
+                                        activeTab = tabId
+                                    }
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Box(
+                                    modifier = if (isSelected) {
+                                        Modifier
+                                            .claySurface(
+                                                baseColor = MaterialTheme.colorScheme.primaryContainer,
+                                                accentColor = MaterialTheme.colorScheme.primary,
+                                                cornerRadius = 16.dp,
+                                                bevelDepth = 2.5.dp
+                                            )
+                                            .padding(horizontal = 14.dp, vertical = 4.dp)
+                                    } else {
+                                        Modifier
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .padding(horizontal = 14.dp, vertical = 4.dp)
+                                    },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = icon,
+                                        contentDescription = label,
+                                        modifier = Modifier.size(20.dp),
+                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
@@ -766,7 +763,7 @@ fun MainScreen(
             if (activeTab == "DASHBOARD") {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.offset(y = 48.dp)
+                    modifier = Modifier.offset(y = 28.dp)
                 ) {
                     androidx.compose.animation.AnimatedVisibility(
                         visible = isFabExpanded,
@@ -914,751 +911,874 @@ fun MainScreen(
         ) {
             when (activeTab) {
                 "DASHBOARD" -> {
+                    val syncedCount = remember(documents) { documents.count { it.isUploaded } }
+                    val pendingSyncCount = remember(documents) { documents.count { !it.isUploaded } }
+
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(rememberScrollState())
                     ) {
-                        // Smart Subfolder Input
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                "Target Subfolder (Optional)",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                "Files will be saved in a subfolder inside '$driveFolderName'.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = targetSubfolder,
-                                onValueChange = { 
-                                    viewModel.setTargetSubfolder(it) 
-                                },
-                                placeholder = { Text("e.g. Customer Name") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
-                                    focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    cursorColor = MaterialTheme.colorScheme.primary
-                                )
-                            )
-                        }
-                    }
-
-                    // Processing Presets Card (Lavender Theme)
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                        shape = RoundedCornerShape(28.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        // Quick Scan & Live Metrics Hero Card (3D Claymorphic Command Center)
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            shape = RoundedCornerShape(24.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                Text(
-                                    text = "Processing Presets",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Surface(
-                                    shape = CircleShape,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(start = 8.dp)
+                                // CLAY ELEMENT TYPE 2: 3D Puffed Clay Metric Capsules
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    ClayMetricCapsule(
+                                        valueText = "${documents.size}",
+                                        labelText = "TOTAL SCANS",
+                                        accentColor = MaterialTheme.colorScheme.primary,
+                                        icon = Icons.Default.Description,
+                                        onClick = {
+                                            capturesFilterMode = "ALL"
+                                            activeTab = "CAPTURES"
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    ClayMetricCapsule(
+                                        valueText = "$syncedCount",
+                                        labelText = "DRIVE SYNCED",
+                                        accentColor = Color(0xFF00C853),
+                                        icon = Icons.Default.CloudDone,
+                                        onClick = {
+                                            capturesFilterMode = "SYNCED"
+                                            activeTab = "CAPTURES"
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    ClayMetricCapsule(
+                                        valueText = "$pendingSyncCount",
+                                        labelText = "LOCAL / PENDING",
+                                        accentColor = if (pendingSyncCount > 0) Color(0xFFFF5252) else Color(0xFF64B5F6),
+                                        icon = if (pendingSyncCount > 0) Icons.Default.Schedule else Icons.Default.Verified,
+                                        onClick = {
+                                            capturesFilterMode = if (pendingSyncCount > 0) "PENDING" else "ALL"
+                                            activeTab = "CAPTURES"
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                // CLAY ELEMENT TYPE 1: Swiggy / Blinkit 3D Clay Action Category Tiles
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = "GLOBAL SETTINGS",
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                                    )
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Card 1
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { showSizeDialog = true }
-                                ) {
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(
-                                            "TARGET SIZE",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        Text(
-                                            "${targetSizeKb} KB",
-                                            style = MaterialTheme.typography.titleLarge,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
-                                }
-                                // Card 2
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { viewModel.updateEnableAiAnalysis(!enableAiAnalysis) }
-                                ) {
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(
-                                            "PARSER ENGINE",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (enableAiAnalysis) "CLOUD AI" else "LOCAL OCR",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (enableAiAnalysis) "Cloud deep learning" else "100% local, fast & offline",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Card 3 (Compression Codec: WEBP / JPEG)
-                                Card(
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                    shape = RoundedCornerShape(16.dp),
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { 
-                                            val nextCodec = if (compressionCodec.equals("WEBP", ignoreCase = true)) "JPEG" else "WEBP"
-                                            viewModel.updateCompressionCodec(nextCodec)
-                                        }
-                                ) {
-                                    Column(modifier = Modifier.padding(12.dp)) {
-                                        Text(
-                                            "COMPRESSION",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "WEBP" else "JPEG",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (compressionCodec.equals("WEBP", ignoreCase = true)) "Higher quality & sharper text" else "Standard compression",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                                
-                                // Placeholder card to maintain grid layout
-                                Spacer(modifier = Modifier.weight(1f))
-                            }
-
-                            // Confirmation Screen Setting Toggle
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.updateShowConfirmation(!showConfirmation) }
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "CONFIRMATION POPUP",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (showConfirmation) "SHOW DETAILS POPUP" else "AUTO SAVE & UPLOAD",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (showConfirmation) "Verify and edit scanned details before uploading" else "Instantly save scans in background without prompts",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Switch(
-                                        checked = showConfirmation,
-                                        onCheckedChange = { viewModel.updateShowConfirmation(it) }
-                                    )
-                                }
-                            }
-
-                            // Auto Enhance Setting Toggle
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.updateAutoEnhanceEnabled(!autoEnhanceEnabled) }
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "SCANNER FILTER",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (autoEnhanceEnabled) "AUTO ENHANCE ON" else "ORIGINAL PHOTO (OFF)",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (autoEnhanceEnabled) "Apply ML cleanup and shadow removal by default" else "Raw camera photo. Best for preserving ID card photos",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Switch(
-                                        checked = autoEnhanceEnabled,
-                                        onCheckedChange = { viewModel.updateAutoEnhanceEnabled(it) }
-                                    )
-                                }
-                            }
-
-                            // A4 Format Setting Toggle
-                            Card(
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.updateUseA4Format(!useA4Format) }
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "ID CARD A4 XEROX FORMAT",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (useA4Format) "A4 SHEET CANVAS" else "ORIGINAL RAW CROPPED",
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(modifier = Modifier.height(2.dp))
-                                        Text(
-                                            if (useA4Format) "Front & Back placed together on upper A4 page (Cyber Cafe Xerox standard)" else "Front & Back combined closely without A4 paper margins",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    Switch(
-                                        checked = useA4Format,
-                                        onCheckedChange = { viewModel.updateUseA4Format(it) }
-                                    )
-                                }
-                            }
-
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(MaterialTheme.colorScheme.surface)
-                                        )
-                                    }
-                                    Text(
-                                        "Auto Stack Docs",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(24.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.primary),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(MaterialTheme.colorScheme.surface)
-                                        )
-                                    }
-                                    Text(
-                                        "AI Auto-Name",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { showBatchSetupDialog = true }
-                                    .padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Layers,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Text(
-                                        "Batch Grouping:",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text(
-                                        text = if (batchPagesPerDoc == 1) "1 Page / Doc (Single)" else if (batchPagesPerDoc == 2) "2 Pages / Doc (Pair)" else "$batchPagesPerDoc Pages / Doc",
+                                        text = "INSTANT SCAN STUDIO",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = MaterialTheme.colorScheme.primary
                                     )
-                                }
-                                Text(
-                                    "Change ➔",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
-                    }
-
-                    // Visual Storage Usage Indicator Card
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Folder,
-                                        contentDescription = "Storage",
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "Dasmo Scan Folder",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                Text(
-                                    text = "Device Documents",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(12.dp))
-                            
-                            val limitBytes = storageLimitMb.toLong() * 1024 * 1024L
-                            val progress = (publicFolderSize.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f)
-                            val isNearLimit = publicFolderSize > limitBytes * 0.8 // warning at 80%
-                            val limitLabel = if (storageLimitMb >= 1000) "${storageLimitMb / 1000} GB" else "$storageLimitMb MB"
-                            
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.Bottom
-                            ) {
-                                Column {
-                                    Text(
-                                        text = "Occupied Storage",
-                                        style = MaterialTheme.typography.bodySmall,
+                                        text = "1-Tap 3D Quick Launch",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Text(
-                                        text = if (publicFolderSize == 0L) "0.00 KB" else {
-                                            val kb = publicFolderSize / 1024.0
-                                            val mb = kb / 1024.0
-                                            val gb = mb / 1024.0
-                                            when {
-                                                gb >= 1.0 -> "${String.format("%.2f", gb)} GB"
-                                                mb >= 1.0 -> "${String.format("%.2f", mb)} MB"
-                                                else -> "${String.format("%.2f", kb)} KB"
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    // 1. Single Scan (Swiggy Coral-Orange Clay)
+                                    SwiggyClayActionTile(
+                                        title = "Single",
+                                        subtitle = "1-PAGE",
+                                        icon = Icons.Default.DocumentScanner,
+                                        accentColor = Color(0xFFFF6D3A),
+                                        isHeroFeatured = false,
+                                        onClick = {
+                                            val lastSizeSub = subfolderAtLastSizeChange
+                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
+                                                    lastSizeSub != null &&
+                                                    targetSubfolder.trim() != lastSizeSub.trim()
+                                            if (shouldWarn) {
+                                                pendingScanType = "SINGLE"
+                                                showTargetSizeWarningDialog = true
+                                            } else {
+                                                launchSingleScan()
                                             }
                                         },
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                                        modifier = Modifier.weight(1f)
                                     )
-                                }
-                                Text(
-                                    text = "Limit: $limitLabel",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            
-                            Spacer(modifier = Modifier.height(8.dp))
-                            
-                            LinearProgressIndicator(
-                                progress = { progress },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(8.dp)
-                                    .clip(RoundedCornerShape(4.dp)),
-                                color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                                trackColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
-                            
-                            Spacer(modifier = Modifier.height(12.dp))
-                            
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = if (isNearLimit) "⚠️ Storage is full! Clean up suggested." else "Storage status healthy",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                TextButton(
-                                    onClick = { showClearJunkWarning = true },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Delete,
-                                        contentDescription = "Trash",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(16.dp)
+
+                                    // 2. Multi-Page Scan (Hero Primary Clay)
+                                    SwiggyClayActionTile(
+                                        title = "Multi-Page",
+                                        subtitle = "ID / DOCS",
+                                        icon = Icons.Default.LibraryAdd,
+                                        accentColor = MaterialTheme.colorScheme.primary,
+                                        isHeroFeatured = true,
+                                        onClick = {
+                                            val lastSizeSub = subfolderAtLastSizeChange
+                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
+                                                    lastSizeSub != null &&
+                                                    targetSubfolder.trim() != lastSizeSub.trim()
+                                            if (shouldWarn) {
+                                                pendingScanType = "MULTI"
+                                                showTargetSizeWarningDialog = true
+                                            } else {
+                                                launchMultiScan()
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        "Clean Up Junk",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.error
+
+                                    // 3. Auto-Batch (Blinkit Emerald Clay)
+                                    SwiggyClayActionTile(
+                                        title = "Auto-Batch",
+                                        subtitle = "BULK AI",
+                                        icon = Icons.Default.Layers,
+                                        accentColor = Color(0xFF00C853),
+                                        isHeroFeatured = false,
+                                        onClick = {
+                                            val lastSizeSub = subfolderAtLastSizeChange
+                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
+                                                    lastSizeSub != null &&
+                                                    targetSubfolder.trim() != lastSizeSub.trim()
+                                            if (shouldWarn) {
+                                                pendingScanType = "BATCH"
+                                                showTargetSizeWarningDialog = true
+                                            } else {
+                                                showBatchSetupDialog = true
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    // 4. Passport Studio (Royal Violet Clay)
+                                    SwiggyClayActionTile(
+                                        title = "Passport",
+                                        subtitle = "STUDIO",
+                                        icon = Icons.Default.AccountBox,
+                                        accentColor = Color(0xFF7C4DFF),
+                                        isHeroFeatured = false,
+                                        onClick = { activeTab = "PASSPORT" },
+                                        modifier = Modifier.weight(1f)
                                     )
                                 }
                             }
                         }
-                    }
 
-                    if (isProcessing) {
-                        LinearProgressIndicator(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = statusMessage,
-                            modifier = Modifier.padding(16.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else if (statusMessage.isNotEmpty()) {
-                        Text(
-                            text = statusMessage,
-                            modifier = Modifier.padding(16.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (statusMessage.contains("Success")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                        )
-                    }
-
-                    if (activeQueue.isNotEmpty()) {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            shape = RoundedCornerShape(16.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        // Pulse status dot representing active sessions
-                                        Box(
-                                            modifier = Modifier
-                                                .size(10.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(0xFFE65100))
+                        // Live Status & Active Session Queue (Promoted right under Scan Actions for immediate visibility)
+                        if (isProcessing) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)),
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.primary
                                         )
                                         Text(
-                                            "Active Session Queue",
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface
+                                            text = statusMessage.ifEmpty { "Optimizing & processing document..." },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
                                         )
                                     }
-                                    TextButton(
-                                        onClick = { viewModel.clearActiveQueue() },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("Clear Completed", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                    LinearProgressIndicator(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(4.dp)
+                                            .clip(RoundedCornerShape(2.dp)),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        } else if (statusMessage.isNotEmpty()) {
+                            Card(
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (statusMessage.contains("Success")) Color(0xFF00E676).copy(alpha = 0.12f)
+                                                     else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = statusMessage,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (statusMessage.contains("Success")) Color(0xFF00E676) else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(onClick = { viewModel.clearStatusMessage() }, modifier = Modifier.size(24.dp)) {
+                                        Icon(Icons.Default.Close, contentDescription = "Dismiss", modifier = Modifier.size(14.dp))
                                     }
                                 }
-                                
-                                Text(
-                                    "Displays live text recognition, image compression, and background Google Drive sync progress.",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(bottom = 12.dp)
-                                )
+                            }
+                        }
 
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Column(
-                                    modifier = Modifier
-                                        .heightIn(max = 280.dp)
-                                        .verticalScroll(rememberScrollState()),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    activeQueue.forEach { item ->
-                                        val isDone = item.status.contains("Completed") || item.status.contains("locally")
-                                        val isFailed = item.status.contains("Failed")
-                                        val isProcessing = !isDone && !isFailed && !item.status.contains("Cancelled")
-                                        
-                                        Column(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
-                                                .border(BorderStroke(1.dp, Color(0xFFF0F1F5)), RoundedCornerShape(12.dp))
-                                                .padding(12.dp)
+                        if (activeQueue.isNotEmpty()) {
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                shape = RoundedCornerShape(18.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(14.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(9.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF00E676))
+                                            )
+                                            Text(
+                                                "Active Session Queue (${activeQueue.size})",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                        }
+                                        TextButton(
+                                            onClick = { viewModel.clearActiveQueue() },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Text("Clear Done", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Column(
+                                        modifier = Modifier
+                                            .heightIn(max = 260.dp)
+                                            .verticalScroll(rememberScrollState()),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        activeQueue.forEach { item ->
+                                            val isDone = item.status.contains("Completed") || item.status.contains("locally")
+                                            val isFailed = item.status.contains("Failed")
+                                            val isItemProcessing = !isDone && !isFailed && !item.status.contains("Cancelled")
+
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                                                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)), RoundedCornerShape(12.dp))
+                                                    .padding(10.dp)
                                             ) {
                                                 Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                    modifier = Modifier.weight(1f)
-                                                ) {
-                                                    Icon(
-                                                        imageVector = if (isDone) Icons.Default.CheckCircle 
-                                                                     else if (isFailed) Icons.Default.Warning 
-                                                                     else Icons.Default.Refresh,
-                                                        contentDescription = "Status Icon",
-                                                        tint = if (isDone) Color(0xFF2E7D32) 
-                                                               else if (isFailed) Color(0xFFC62828) 
-                                                               else MaterialTheme.colorScheme.primary,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
-                                                    Column {
-                                                        Text(
-                                                            text = "${item.personName}'s ${item.documentType}",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = MaterialTheme.colorScheme.onSurface
-                                                        )
-                                                        val formatLabel = when (item.format) {
-                                                            com.example.ui.UploadFormat.PDF -> "PDF"
-                                                            com.example.ui.UploadFormat.JPEG -> "JPEG"
-                                                            com.example.ui.UploadFormat.BOTH -> "JPEG + PDF"
-                                                        }
-                                                        Text(
-                                                            text = "Format: $formatLabel",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                }
-                                                
-                                                Box(
-                                                    modifier = Modifier
-                                                        .clip(RoundedCornerShape(6.dp))
-                                                        .background(
-                                                            if (isDone) Color(0xFFE8F5E9) 
-                                                            else if (isFailed) Color(0xFFFFEBEE) 
-                                                            else Color(0xFFE8EAF6)
-                                                        )
-                                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                                ) {
-                                                    Text(
-                                                        text = item.status,
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        fontWeight = FontWeight.ExtraBold,
-                                                        color = if (isDone) Color(0xFF2E7D32) 
-                                                                else if (isFailed) Color(0xFFC62828) 
-                                                                else MaterialTheme.colorScheme.primary
-                                                    )
-                                                }
-                                            }
-                                            
-                                            if (isFailed && item.docId != null) {
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                Row(
                                                     modifier = Modifier.fillMaxWidth(),
-                                                    horizontalArrangement = Arrangement.End
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.SpaceBetween
                                                 ) {
-                                                    OutlinedButton(
-                                                        onClick = {
-                                                            viewModel.retryUpload(context, setOf(item.docId))
-                                                            Toast.makeText(context, "Resuming upload for ${item.personName}...", Toast.LENGTH_SHORT).show()
-                                                        },
-                                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                        modifier = Modifier.weight(1f)
                                                     ) {
                                                         Icon(
-                                                            imageVector = Icons.Default.Refresh,
-                                                            contentDescription = "Retry Upload",
-                                                            tint = MaterialTheme.colorScheme.error,
-                                                            modifier = Modifier.size(14.dp)
+                                                            imageVector = if (isDone) Icons.Default.CheckCircle
+                                                                         else if (isFailed) Icons.Default.Warning
+                                                                         else Icons.Default.Sync,
+                                                            contentDescription = "Status Icon",
+                                                            tint = if (isDone) Color(0xFF00E676)
+                                                                   else if (isFailed) MaterialTheme.colorScheme.error
+                                                                   else MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.size(18.dp)
                                                         )
-                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Column {
+                                                            Text(
+                                                                text = "${item.personName}'s ${item.documentType}",
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = MaterialTheme.colorScheme.onSurface
+                                                            )
+                                                            val formatLabel = when (item.format) {
+                                                                com.example.ui.UploadFormat.PDF -> "PDF"
+                                                                com.example.ui.UploadFormat.JPEG -> "JPEG"
+                                                                com.example.ui.UploadFormat.BOTH -> "JPEG + PDF"
+                                                            }
+                                                            Text(
+                                                                text = "Format: $formatLabel",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            )
+                                                        }
+                                                    }
+
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                            .background(
+                                                                if (isDone) Color(0xFF00E676).copy(alpha = 0.16f)
+                                                                else if (isFailed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                                                                else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                                                            )
+                                                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                    ) {
                                                         Text(
-                                                            text = "Retry Upload",
+                                                            text = item.status,
                                                             style = MaterialTheme.typography.labelSmall,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = MaterialTheme.colorScheme.error
+                                                            fontWeight = FontWeight.ExtraBold,
+                                                            color = if (isDone) Color(0xFF00E676)
+                                                                    else if (isFailed) MaterialTheme.colorScheme.error
+                                                                    else MaterialTheme.colorScheme.primary
                                                         )
                                                     }
                                                 }
-                                            }
 
-                                            if (isProcessing) {
-                                                Spacer(modifier = Modifier.height(8.dp))
-                                                LinearProgressIndicator(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .height(4.dp)
-                                                        .clip(RoundedCornerShape(2.dp)),
-                                                    color = MaterialTheme.colorScheme.primary,
-                                                    trackColor = MaterialTheme.colorScheme.outlineVariant
-                                                )
+                                                if (isFailed && item.docId != null) {
+                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.End
+                                                    ) {
+                                                        OutlinedButton(
+                                                            onClick = {
+                                                                viewModel.retryUpload(context, setOf(item.docId))
+                                                                Toast.makeText(context, "Resuming upload for ${item.personName}...", Toast.LENGTH_SHORT).show()
+                                                            },
+                                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Refresh,
+                                                                contentDescription = "Retry Upload",
+                                                                tint = MaterialTheme.colorScheme.error,
+                                                                modifier = Modifier.size(14.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = "Retry Upload",
+                                                                style = MaterialTheme.typography.labelSmall,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = MaterialTheme.colorScheme.error
+                                                            )
+                                                        }
+                                                    }
+                                                }
+
+                                                if (isItemProcessing) {
+                                                    Spacer(modifier = Modifier.height(6.dp))
+                                                    LinearProgressIndicator(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .height(4.dp)
+                                                            .clip(RoundedCornerShape(2.dp)),
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                        trackColor = MaterialTheme.colorScheme.outlineVariant
+                                                    )
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(120.dp))
+                        // Smart Subfolder Input Card
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            shape = RoundedCornerShape(18.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Icon(Icons.Default.CreateNewFolder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                        Text(
+                                            "Destination Subfolder",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "Root: ${driveFolderName ?: "My Drive"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.clickable {
+                                            folderDialogMode = "DEFAULT"
+                                            showFolderDialog = true
+                                        }
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = targetSubfolder,
+                                    onValueChange = { viewModel.setTargetSubfolder(it) },
+                                    placeholder = { Text("Optional client / batch folder (e.g. Subhojit_KYC)") },
+                                    singleLine = true,
+                                    trailingIcon = {
+                                        if (targetSubfolder.isNotEmpty()) {
+                                            IconButton(onClick = { viewModel.setTargetSubfolder("") }) {
+                                                Icon(Icons.Default.Close, contentDescription = "Clear Subfolder", modifier = Modifier.size(18.dp))
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                        focusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        unfocusedPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                        unfocusedBorderColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        cursorColor = MaterialTheme.colorScheme.primary
+                                    )
+                                )
+                            }
+                        }
+
+                        // Processing Engine & Presets Card (Complete 2x2 Bento Grid + Streamlined Workflow Toggles)
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                            shape = RoundedCornerShape(24.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "Engine & Output Presets",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "Adaptive DCT • Micro-Denoise • Zero White-Bleach",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .claySurface(
+                                                baseColor = MaterialTheme.colorScheme.primary,
+                                                accentColor = MaterialTheme.colorScheme.primary,
+                                                cornerRadius = 10.dp,
+                                                bevelDepth = 2.5.dp,
+                                                isHeroSolid = true
+                                            )
+                                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                                    ) {
+                                        Text(
+                                            text = "PRO ENGINE",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+
+                                // CLAY ELEMENT TYPE 3: 2x2 Sculpted 3D Clay Bento Grid
+                                // Row 1: Target Size & Output Format
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    // Bento Tile 1: Target Size (Swiggy Coral-Orange Clay)
+                                    ClayBentoPresetTile(
+                                        badgeLabel = "TARGET SIZE",
+                                        valueTitle = "${targetSizeKb} KB",
+                                        subtitle = "Tap to set KB limit",
+                                        icon = Icons.Default.Tune,
+                                        accentColor = Color(0xFFFF6D3A),
+                                        onClick = { showSizeDialog = true },
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    // Bento Tile 2: Output Format (1-Tap Cycle PDF -> JPEG -> BOTH)
+                                    ClayBentoPresetTile(
+                                        badgeLabel = "OUTPUT FORMAT",
+                                        valueTitle = when (imageFormat.uppercase()) {
+                                            "PDF" -> "PDF DOC"
+                                            "BOTH" -> "PDF + JPEG"
+                                            else -> "JPEG IMG"
+                                        },
+                                        subtitle = "1-tap cycle format",
+                                        icon = Icons.Default.PictureAsPdf,
+                                        accentColor = Color(0xFF00C853),
+                                        onClick = {
+                                            val nextFmt = when (imageFormat.uppercase()) {
+                                                "PDF" -> "JPEG"
+                                                "JPEG" -> "BOTH"
+                                                else -> "PDF"
+                                            }
+                                            viewModel.updateImageFormat(nextFmt)
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                // Row 2: Parser Engine & Image Codec
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    // Bento Tile 3: Parser Engine
+                                    ClayBentoPresetTile(
+                                        badgeLabel = "PARSER ENGINE",
+                                        valueTitle = if (enableAiAnalysis) "CLOUD AI" else "LOCAL OCR",
+                                        subtitle = if (enableAiAnalysis) "Deep Gemini Vision" else "99% ID Name Parser",
+                                        icon = if (enableAiAnalysis) Icons.Default.AutoAwesome else Icons.Default.Memory,
+                                        accentColor = Color(0xFF7C4DFF),
+                                        onClick = { viewModel.updateEnableAiAnalysis(!enableAiAnalysis) },
+                                        modifier = Modifier.weight(1f)
+                                    )
+
+                                    // Bento Tile 4: Smart Compression Codec
+                                    ClayBentoPresetTile(
+                                        badgeLabel = "IMAGE CODEC",
+                                        valueTitle = if (compressionCodec.equals("WEBP", ignoreCase = true)) "WEBP LOSSY" else "ADAPTIVE DCT",
+                                        subtitle = if (compressionCodec.equals("WEBP", ignoreCase = true)) "Ultra-compact text" else "Zero white-bleach",
+                                        icon = Icons.Default.HighQuality,
+                                        accentColor = Color(0xFF00B0FF),
+                                        onClick = {
+                                            val nextCodec = if (compressionCodec.equals("WEBP", ignoreCase = true)) "JPEG" else "WEBP"
+                                            viewModel.updateCompressionCodec(nextCodec)
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+
+                                // Streamlined Workflow Switches
+                                Card(
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+                                    shape = RoundedCornerShape(16.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                                        // Switch 1: Confirmation Popup
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { viewModel.updateShowConfirmation(!showConfirmation) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = if (showConfirmation) "Verify Details Before Sync" else "Instant Auto-Save & Sync",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = if (showConfirmation) "Review person name, doc type & KB size popup" else "Zero-prompt background queue processing",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Switch(
+                                                checked = showConfirmation,
+                                                onCheckedChange = { viewModel.updateShowConfirmation(it) }
+                                            )
+                                        }
+
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f), modifier = Modifier.padding(horizontal = 12.dp))
+
+                                        // Switch 2: Smart Ink & Denoise Filter
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { viewModel.updateAutoEnhanceEnabled(!autoEnhanceEnabled) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = if (autoEnhanceEnabled) "Smart Ink & Micro-Denoise ON" else "Raw Camera Capture (Filter OFF)",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = if (autoEnhanceEnabled) "Sharpens small text & strips grain without bleaching colors" else "Preserves raw camera lighting",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Switch(
+                                                checked = autoEnhanceEnabled,
+                                                onCheckedChange = { viewModel.updateAutoEnhanceEnabled(it) }
+                                            )
+                                        }
+
+                                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f), modifier = Modifier.padding(horizontal = 12.dp))
+
+                                        // Switch 3: A4 Xerox ID Sheet
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { viewModel.updateUseA4Format(!useA4Format) }
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = if (useA4Format) "ID Card A4 Xerox Sheet Layout" else "Compact Edge-to-Edge Stack",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Text(
+                                                    text = if (useA4Format) "Places Front & Back on upper A4 canvas for direct printing" else "Stacks Front & Back tightly with minimal margin",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Switch(
+                                                checked = useA4Format,
+                                                onCheckedChange = { viewModel.updateUseA4Format(it) }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { showBatchSetupDialog = true }
+                                        .padding(vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Layers,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            "Batch Grouping:",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = if (batchPagesPerDoc == 1) "1 Page / Doc (Single)" else if (batchPagesPerDoc == 2) "2 Pages / Doc (Front & Back)" else "$batchPagesPerDoc Pages / Doc",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Text(
+                                        "Configure ➔",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+
+                        // Visual Storage Usage Indicator Card
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            shape = RoundedCornerShape(18.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = "Storage",
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Dasmo Scan Storage",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "Documents/Dasmo Scan",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                val limitBytes = storageLimitMb.toLong() * 1024 * 1024L
+                                val progress = (publicFolderSize.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f)
+                                val isNearLimit = publicFolderSize > limitBytes * 0.8
+                                val limitLabel = if (storageLimitMb >= 1000) "${storageLimitMb / 1000} GB" else "$storageLimitMb MB"
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.Bottom
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = "Occupied Space",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = if (publicFolderSize == 0L) "0.00 KB" else {
+                                                val kb = publicFolderSize / 1024.0
+                                                val mb = kb / 1024.0
+                                                val gb = mb / 1024.0
+                                                when {
+                                                    gb >= 1.0 -> "${String.format("%.2f", gb)} GB"
+                                                    mb >= 1.0 -> "${String.format("%.2f", mb)} MB"
+                                                    else -> "${String.format("%.2f", kb)} KB"
+                                                }
+                                            },
+                                            style = MaterialTheme.typography.titleLarge,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "Quota: $limitLabel",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                LinearProgressIndicator(
+                                    progress = { progress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(7.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                )
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (isNearLimit) "⚠️ Storage near limit — cleanup advised" else "✓ Local storage healthy",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isNearLimit) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    TextButton(
+                                        onClick = { showClearJunkWarning = true },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "Trash",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            "Clean Up Junk",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(120.dp))
                     }
                 }
                 "CAPTURES" -> {
+                    val filteredCaptures = remember(documents, capturesSearchQuery, capturesFilterMode) {
+                        documents.filter { doc ->
+                            val matchesMode = when (capturesFilterMode) {
+                                "SYNCED" -> doc.isUploaded
+                                "PENDING" -> !doc.isUploaded
+                                else -> true
+                            }
+                            val q = capturesSearchQuery.trim()
+                            val matchesSearch = q.isEmpty() ||
+                                    doc.personName.contains(q, ignoreCase = true) ||
+                                    doc.documentType.contains(q, ignoreCase = true) ||
+                                    doc.fileName.contains(q, ignoreCase = true)
+                            matchesMode && matchesSearch
+                        }
+                    }
+
+                    // Header & Selection Toolbar
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1667,13 +1787,13 @@ fun MainScreen(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = if (selectedDocIds.isNotEmpty()) "${selectedDocIds.size} Selected" else "Recent Captures",
+                            text = if (selectedDocIds.isNotEmpty()) "${selectedDocIds.size} Selected" else "Recent Captures (${filteredCaptures.size})",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                         if (selectedDocIds.isNotEmpty()) {
-                            Row {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(onClick = {
                                     val count = selectedDocIds.size
                                     viewModel.retryUpload(context, selectedDocIds)
@@ -1711,43 +1831,130 @@ fun MainScreen(
                                     Icon(imageVector = Icons.Default.Share, contentDescription = "Share Selected")
                                 }
                                 if (selectedDocIds.size >= 2) {
-                                    IconButton(onClick = { 
+                                    IconButton(onClick = {
                                         mergeFileName = "Merged_${System.currentTimeMillis()}"
                                         mergeFolderName = ""
                                         mergeFolderId = null
                                         mergeTargetSizeKb = targetSizeKb.toString()
-                                        showMergeDialog = true 
+                                        showMergeDialog = true
                                     }) {
-                                        Icon(imageVector = Icons.Default.Add, contentDescription = "Merge to PDF")
+                                        Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = "Merge to PDF", tint = MaterialTheme.colorScheme.primary)
                                     }
+                                }
+                                IconButton(onClick = {
+                                    val count = selectedDocIds.size
+                                    viewModel.deleteSelectedDocuments(selectedDocIds)
+                                    selectedDocIds = setOf()
+                                    Toast.makeText(context, "Deleted $count document(s)", Toast.LENGTH_SHORT).show()
+                                }) {
+                                    Icon(imageVector = Icons.Default.Delete, contentDescription = "Delete Selected", tint = MaterialTheme.colorScheme.error)
                                 }
                                 IconButton(onClick = { selectedDocIds = setOf() }) {
                                     Icon(imageVector = Icons.Default.Close, contentDescription = "Cancel Selection")
                                 }
                             }
+                        } else if (documents.isNotEmpty()) {
+                            TextButton(
+                                onClick = {
+                                    selectedDocIds = filteredCaptures.map { it.id }.toSet()
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("Select All", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
 
-                    if (documents.isEmpty()) {
+                    // Search & Filter Bar
+                    if (documents.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = capturesSearchQuery,
+                                onValueChange = { capturesSearchQuery = it },
+                                placeholder = { Text("Search by client name, ID type, or file...") },
+                                singleLine = true,
+                                shape = RoundedCornerShape(14.dp),
+                                leadingIcon = {
+                                    Icon(Icons.Default.Search, contentDescription = "Search Captures")
+                                },
+                                trailingIcon = {
+                                    if (capturesSearchQuery.isNotEmpty()) {
+                                        IconButton(onClick = { capturesSearchQuery = "" }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Clear Search")
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                listOf(
+                                    "ALL" to "All (${documents.size})",
+                                    "SYNCED" to "Synced (${documents.count { it.isUploaded }})",
+                                    "PENDING" to "Pending (${documents.count { !it.isUploaded }})"
+                                ).forEach { (mode, label) ->
+                                    val isSelected = capturesFilterMode == mode
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = { capturesFilterMode = mode },
+                                        label = {
+                                            Text(
+                                                text = label,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                style = MaterialTheme.typography.labelSmall
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (filteredCaptures.isEmpty()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(200.dp),
+                                .weight(1f)
+                                .padding(32.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = "No documents scanned yet. Press + to start.",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(48.dp)
+                                )
+                                Text(
+                                    text = if (documents.isEmpty()) "No documents scanned yet. Tap any scan action on Home to start."
+                                           else "No captures match your current search or filter.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
                         }
                     } else {
                         LazyColumn(
-                            contentPadding = PaddingValues(bottom = 90.dp, start = 16.dp, end = 16.dp),
+                            contentPadding = PaddingValues(top = 8.dp, bottom = 90.dp, start = 16.dp, end = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.fillMaxWidth().weight(1f)
                         ) {
-                            items(documents.size) { index ->
-                                val doc = documents[index]
+                            items(
+                                count = filteredCaptures.size,
+                                key = { index -> filteredCaptures[index].id }
+                            ) { index ->
+                                val doc = filteredCaptures[index]
                                 val isSelected = selectedDocIds.contains(doc.id)
                                 DocumentItem(
                                     doc = doc,
@@ -1755,7 +1962,7 @@ fun MainScreen(
                                     onLongClick = {
                                         selectedDocIds = selectedDocIds + doc.id
                                     },
-                                    onClick = { 
+                                    onClick = {
                                         if (selectedDocIds.isNotEmpty()) {
                                             selectedDocIds = if (isSelected) {
                                                 selectedDocIds - doc.id
@@ -1927,10 +2134,12 @@ fun MainScreen(
                                 }
                             }
 
-                            val filteredDriveFiles = driveFiles.filter { file ->
-                                file.name.contains(searchQuery, ignoreCase = true) ||
-                                (file.folderName ?: "").contains(searchQuery, ignoreCase = true) ||
-                                file.mimeType.contains(searchQuery, ignoreCase = true)
+                            val filteredDriveFiles = remember(driveFiles, searchQuery) {
+                                driveFiles.filter { file ->
+                                    file.name.contains(searchQuery, ignoreCase = true) ||
+                                    (file.folderName ?: "").contains(searchQuery, ignoreCase = true) ||
+                                    file.mimeType.contains(searchQuery, ignoreCase = true)
+                                }
                             }
 
                             Row(
@@ -1952,8 +2161,9 @@ fun MainScreen(
                                     fontWeight = FontWeight.ExtraBold,
                                     color = Color(0xFF4CAF50),
                                     modifier = Modifier
-                                        .background(Color(0xFFE8F5E9), shape = RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                        .background(Color(0xFF4CAF50).copy(alpha = 0.16f), shape = RoundedCornerShape(6.dp))
+                                        .border(1.dp, Color(0xFF4CAF50).copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
                             }
 
@@ -2001,7 +2211,10 @@ fun MainScreen(
                                         .fillMaxWidth()
                                         .weight(1f)
                                 ) {
-                                    items(filteredDriveFiles.size) { index ->
+                                    items(
+                                        count = filteredDriveFiles.size,
+                                        key = { index -> filteredDriveFiles[index].id }
+                                    ) { index ->
                                         val file = filteredDriveFiles[index]
                                         DriveFileItem(file) {
                                             file.webViewLink?.let { link ->
@@ -3763,7 +3976,10 @@ fun MainScreen(
                                 } else {
                                     selectedPages.coerceIn(1, 100)
                                 }
-                                viewModel.updateBatchPagesPerDoc(finalPages)
+                                sessionBatchPagesPerDoc = finalPages
+                                if (rememberAsDefault) {
+                                    viewModel.updateBatchPagesPerDoc(finalPages)
+                                }
                                 showBatchSetupDialog = false
                                 launchContinuousBatchCamera()
                             },
@@ -3784,7 +4000,10 @@ fun MainScreen(
                                 } else {
                                     selectedPages.coerceIn(1, 100)
                                 }
-                                viewModel.updateBatchPagesPerDoc(finalPages)
+                                sessionBatchPagesPerDoc = finalPages
+                                if (rememberAsDefault) {
+                                    viewModel.updateBatchPagesPerDoc(finalPages)
+                                }
                                 showBatchSetupDialog = false
                                 launchBatchScan()
                             },
@@ -3805,7 +4024,7 @@ fun MainScreen(
     if (showContinuousBatchCamera) {
         com.example.ui.BatchCameraScanScreen(
             onDismiss = { showContinuousBatchCamera = false },
-            initialPagesPerDoc = batchPagesPerDoc,
+            initialPagesPerDoc = sessionBatchPagesPerDoc,
             onFinishBatch = { uris, pagesPerDoc ->
                 showContinuousBatchCamera = false
                 viewModel.processBatchScannedImages(uris, pagesPerDoc)
@@ -3868,11 +4087,15 @@ fun MainScreen(
                     )
 
                     var isPreviewExpanded by remember { mutableStateOf(false) }
+                    val compressedSizeKbLabel = remember(doc.compressedFile) {
+                        val kb = doc.compressedFile.length() / 1024f
+                        String.format(Locale.US, "%.1f KB", kb)
+                    }
 
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(if (isPreviewExpanded) 260.dp else 110.dp)
+                            .height(if (isPreviewExpanded) 260.dp else 118.dp)
                             .clickable { isPreviewExpanded = !isPreviewExpanded },
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -3887,6 +4110,20 @@ fun MainScreen(
                                     .clip(RoundedCornerShape(8.dp)),
                                 contentScale = if (isPreviewExpanded) ContentScale.Fit else ContentScale.Crop
                             )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .padding(10.dp)
+                                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    "Optimized: $compressedSizeKbLabel (${doc.pageFiles?.size ?: 1} pg)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF00E676)
+                                )
+                            }
                             if (!isPreviewExpanded) {
                                 Box(
                                     modifier = Modifier
@@ -4546,36 +4783,62 @@ fun MainScreen(
 
     if (selectedPreviewDoc != null) {
         val doc = selectedPreviewDoc!!
+        val formattedPreviewDate = remember(doc.timestamp) {
+            SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(Date(doc.timestamp))
+        }
         AlertDialog(
             onDismissRequest = { selectedPreviewDoc = null },
             title = {
-                Text(
-                    text = "Document Details & Local File Info",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Document Details",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    IconButton(
+                        onClick = {
+                            viewModel.deleteSelectedDocuments(setOf(doc.id))
+                            selectedPreviewDoc = null
+                            Toast.makeText(context, "Deleted ${doc.fileName}", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Delete Document",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             },
             text = {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Image(
-                        painter = rememberAsyncImagePainter(model = doc.localFilePath),
-                        contentDescription = "Full Document",
+                    DocumentThumbnail(
+                        localFilePath = doc.localFilePath,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(200.dp)
+                            .height(210.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentScale = ContentScale.Fit
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
                     )
 
                     Spacer(modifier = Modifier.height(4.dp))
 
                     Text(
-                        text = "File localFilePath: ${doc.localFilePath}",
+                        text = "File Path: ${doc.localFilePath}",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary
@@ -4601,7 +4864,7 @@ fun MainScreen(
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Scanned On", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                         Text(
-                            SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(Date(doc.timestamp)),
+                            formattedPreviewDate,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -4623,17 +4886,17 @@ fun MainScreen(
                     onClick = { selectedPreviewDoc = null },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
-                    Text("OK")
+                    Text("Close")
                 }
             },
             dismissButton = {
                 Button(
                     onClick = {
-                        val doc = selectedPreviewDoc!!
-                        editingDoc = doc
-                        editPersonName = doc.personName
-                        editDocType = doc.documentType
-                        editFormat = if (doc.fileName.endsWith(".pdf", ignoreCase = true)) com.example.ui.UploadFormat.PDF else com.example.ui.UploadFormat.JPEG
+                        val targetDoc = selectedPreviewDoc!!
+                        editingDoc = targetDoc
+                        editPersonName = targetDoc.personName
+                        editDocType = targetDoc.documentType
+                        editFormat = if (targetDoc.fileName.endsWith(".pdf", ignoreCase = true)) com.example.ui.UploadFormat.PDF else com.example.ui.UploadFormat.JPEG
                         editScannedUris = null
                         editDocIdForScan = null
                         selectedPreviewDoc = null
@@ -4809,9 +5072,59 @@ fun MainScreen(
     }
 }
 
+@Composable
+fun DocumentThumbnail(
+    localFilePath: String,
+    contentScale: ContentScale,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val resolvedFile by androidx.compose.runtime.produceState<java.io.File?>(initialValue = null, key1 = localFilePath) {
+        value = com.example.data.ImageProcessor.getOrCreateThumbnailFile(context, localFilePath)
+    }
+    val isPdf = remember(localFilePath) { localFilePath.endsWith(".pdf", ignoreCase = true) }
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        if (resolvedFile != null) {
+            Image(
+                painter = rememberAsyncImagePainter(model = resolvedFile),
+                contentDescription = "Document Thumbnail",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = contentScale
+            )
+            if (isPdf) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .background(Color(0xFFD32F2F).copy(alpha = 0.9f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Text(
+                        text = "PDF",
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                }
+            }
+        } else {
+            Icon(
+                imageVector = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Image,
+                contentDescription = "Document Icon",
+                tint = if (isPdf) Color(0xFFEF5350) else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+}
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: () -> Unit = {}, onClick: () -> Unit, onRetryClick: (() -> Unit)? = null) {
+    val formattedDate = remember(doc.timestamp) {
+        SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(Date(doc.timestamp))
+    }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -4819,9 +5132,14 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(
+            width = if (isSelected) 1.5.dp else 1.dp,
+            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f) else MaterialTheme.colorScheme.surface
         )
     ) {
         Row(
@@ -4835,33 +5153,27 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
                     modifier = Modifier.padding(end = 8.dp)
                 )
             }
-            Image(
-                painter = rememberAsyncImagePainter(model = doc.localFilePath),
-                contentDescription = "Document Thumbnail",
+            DocumentThumbnail(
+                localFilePath = doc.localFilePath,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(64.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-                contentScale = ContentScale.Crop
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
             )
-            Spacer(modifier = Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Spacer(modifier = Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     text = "${doc.personName}'s ${doc.documentType}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
                     text = doc.fileName,
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
-                )
-                Text(
-                    text = "📱 Local: ${doc.localFilePath}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 if (doc.drivePath != null) {
                     Text(
@@ -4872,15 +5184,22 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
                     )
                 } else if (doc.isUploaded) {
                     Text(
-                        text = "☁️ Drive: Uploaded",
+                        text = "☁️ Drive: Synced",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF4CAF50)
                     )
+                } else {
+                    Text(
+                        text = "📱 Saved Locally (Pending Sync)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFFFB300)
+                    )
                 }
                 Text(
-                    text = SimpleDateFormat("MMM dd, yyyy HH:mm", Locale.getDefault()).format(Date(doc.timestamp)),
-                    style = MaterialTheme.typography.bodySmall,
+                    text = formattedDate,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -4888,7 +5207,7 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
                 Icon(
                     Icons.Default.CheckCircle, 
                     contentDescription = "Uploaded", 
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = Color(0xFF4CAF50),
                     modifier = Modifier.size(24.dp)
                 )
             } else if (onRetryClick != null) {
@@ -4896,15 +5215,15 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
                     Icon(
                         Icons.Default.CloudUpload, 
                         contentDescription = "Upload Failed - Retry", 
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(28.dp)
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             } else {
                 Icon(
                     Icons.Default.Warning, 
-                    contentDescription = "Upload Failed", 
-                    tint = MaterialTheme.colorScheme.error,
+                    contentDescription = "Pending Upload", 
+                    tint = Color(0xFFFFB300),
                     modifier = Modifier.size(24.dp)
                 )
             }
@@ -4914,36 +5233,26 @@ fun DocumentItem(doc: DocumentEntity, isSelected: Boolean = false, onLongClick: 
 
 @Composable
 fun DriveFileItem(file: com.example.network.DriveFile, onOpenClick: () -> Unit) {
+    val isPdf = remember(file.mimeType) { file.mimeType.contains("pdf", ignoreCase = true) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onOpenClick() },
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
         shape = RoundedCornerShape(16.dp)
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        if (file.mimeType.contains("pdf", ignoreCase = true)) Color(0xFFFFEBEE)
-                        else Color(0xFFE8F5E9)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Info,
-                    contentDescription = "Document Icon",
-                    tint = if (file.mimeType.contains("pdf", ignoreCase = true)) Color(0xFFD32F2F)
-                           else Color(0xFF388E3C),
-                    modifier = Modifier.size(24.dp)
-                )
-            }
+            ClayIconOrb(
+                icon = if (isPdf) Icons.Default.PictureAsPdf else Icons.Default.Image,
+                accentColor = if (isPdf) Color(0xFFFF5252) else Color(0xFF00C853),
+                orbSize = 46.dp,
+                iconSize = 22.dp
+            )
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -4998,9 +5307,13 @@ fun DriveFileItem(file: com.example.network.DriveFile, onOpenClick: () -> Unit) 
             IconButton(
                 onClick = onOpenClick,
                 modifier = Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .size(38.dp)
+                    .claySurface(
+                        baseColor = MaterialTheme.colorScheme.surfaceVariant,
+                        accentColor = MaterialTheme.colorScheme.primary,
+                        cornerRadius = 19.dp,
+                        bevelDepth = 2.5.dp
+                    )
             ) {
                 Icon(
                     imageVector = Icons.Default.Search,
@@ -5012,6 +5325,341 @@ fun DriveFileItem(file: com.example.network.DriveFile, onOpenClick: () -> Unit) 
         }
     }
 }
+
+/**
+ * 3D Claymorphism Surface Modifier (Swiggy / Blinkit tactile 3D clay pillow effect):
+ * Renders a soft 3D body gradient, a bright top-left specular inner rim highlight,
+ * and a physical bottom-right 3D clay bevel lip for genuine tactile depth.
+ */
+fun Modifier.claySurface(
+    baseColor: Color,
+    accentColor: Color = baseColor,
+    cornerRadius: androidx.compose.ui.unit.Dp = 20.dp,
+    bevelDepth: androidx.compose.ui.unit.Dp = 3.5.dp,
+    isHeroSolid: Boolean = false
+): Modifier = this
+    .clip(RoundedCornerShape(cornerRadius))
+    .background(
+        brush = androidx.compose.ui.graphics.Brush.linearGradient(
+            colors = if (isHeroSolid) {
+                listOf(
+                    androidx.compose.ui.graphics.lerp(accentColor, Color.White, 0.22f),
+                    accentColor,
+                    androidx.compose.ui.graphics.lerp(accentColor, Color.Black, 0.22f)
+                )
+            } else {
+                listOf(
+                    androidx.compose.ui.graphics.lerp(baseColor, accentColor, 0.18f),
+                    baseColor,
+                    androidx.compose.ui.graphics.lerp(baseColor, Color.Black, 0.14f)
+                )
+            }
+        ),
+        shape = RoundedCornerShape(cornerRadius)
+    )
+    .drawWithContent {
+        drawContent()
+        val strokePx = bevelDepth.toPx()
+        val radiusPx = cornerRadius.toPx()
+        // 1. Bottom-right 3D clay physical lip / inner shadow
+        drawRoundRect(
+            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    Color.Black.copy(alpha = if (isHeroSolid) 0.28f else 0.22f)
+                ),
+                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                end = androidx.compose.ui.geometry.Offset(size.width, size.height)
+            ),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(radiusPx, radiusPx),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokePx * 1.35f)
+        )
+        // 2. Top-left glossy clay specular highlight rim
+        drawRoundRect(
+            brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = if (isHeroSolid) 0.48f else 0.28f),
+                    accentColor.copy(alpha = 0.25f),
+                    Color.Transparent
+                ),
+                start = androidx.compose.ui.geometry.Offset(0f, 0f),
+                end = androidx.compose.ui.geometry.Offset(size.width * 0.85f, size.height * 0.85f)
+            ),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius(radiusPx, radiusPx),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokePx * 0.75f)
+        )
+    }
+
+/**
+ * CLAY ELEMENT TYPE 1A: 3D Sculpted Clay Icon Orb (with glossy specular highlight dot)
+ */
+@Composable
+fun ClayIconOrb(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accentColor: Color,
+    orbSize: androidx.compose.ui.unit.Dp = 42.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 22.dp,
+    isSolidWhiteOrb: Boolean = false
+) {
+    Box(
+        modifier = Modifier
+            .size(orbSize)
+            .clip(RoundedCornerShape(orbSize * 0.36f))
+            .background(
+                brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                    colors = if (isSolidWhiteOrb) {
+                        listOf(
+                            Color.White,
+                            Color.White.copy(alpha = 0.90f),
+                            androidx.compose.ui.graphics.lerp(Color.White, accentColor, 0.28f)
+                        )
+                    } else {
+                        listOf(
+                            androidx.compose.ui.graphics.lerp(accentColor, Color.White, 0.38f),
+                            accentColor,
+                            androidx.compose.ui.graphics.lerp(accentColor, Color.Black, 0.28f)
+                        )
+                    }
+                )
+            )
+            .border(
+                width = 1.2.dp,
+                brush = androidx.compose.ui.graphics.Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.65f),
+                        Color.Black.copy(alpha = 0.22f)
+                    )
+                ),
+                shape = RoundedCornerShape(orbSize * 0.36f)
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        // Specular 3D clay shine dot in top-left corner
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = orbSize * 0.14f, top = orbSize * 0.12f)
+                .size(orbSize * 0.18f, orbSize * 0.10f)
+                .clip(CircleShape)
+                .background(Color.White.copy(alpha = 0.55f))
+        )
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = if (isSolidWhiteOrb) accentColor else Color.White,
+            modifier = Modifier.size(iconSize)
+        )
+    }
+}
+
+/**
+ * CLAY ELEMENT TYPE 1B: Swiggy / Blinkit 3D Clay Action Category Tile
+ */
+@Composable
+fun SwiggyClayActionTile(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accentColor: Color,
+    isHeroFeatured: Boolean = false,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val baseSurface = MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        modifier = modifier
+            .claySurface(
+                baseColor = baseSurface,
+                accentColor = accentColor,
+                cornerRadius = 20.dp,
+                bevelDepth = 3.5.dp,
+                isHeroSolid = isHeroFeatured
+            )
+            .clickable(onClick = onClick)
+            .padding(vertical = 12.dp, horizontal = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            ClayIconOrb(
+                icon = icon,
+                accentColor = accentColor,
+                orbSize = 40.dp,
+                iconSize = 21.dp,
+                isSolidWhiteOrb = isHeroFeatured
+            )
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = if (isHeroFeatured) Color.White else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+            Surface(
+                shape = RoundedCornerShape(50),
+                color = if (isHeroFeatured) Color.Black.copy(alpha = 0.22f) else accentColor.copy(alpha = 0.16f)
+            ) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontSize = 8.5.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = if (isHeroFeatured) Color.White else accentColor,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+/**
+ * CLAY ELEMENT TYPE 2: 3D Puffed Clay Metric Capsule & Status Pill
+ */
+@Composable
+fun ClayMetricCapsule(
+    valueText: String,
+    labelText: String,
+    accentColor: Color,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val baseSurface = MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        modifier = modifier
+            .claySurface(
+                baseColor = baseSurface,
+                accentColor = accentColor,
+                cornerRadius = 18.dp,
+                bevelDepth = 3.dp,
+                isHeroSolid = false
+            )
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp, horizontal = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                                colors = listOf(
+                                    androidx.compose.ui.graphics.lerp(accentColor, Color.White, 0.35f),
+                                    accentColor
+                                )
+                            )
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(12.dp)
+                    )
+                }
+                Text(
+                    text = valueText,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = accentColor
+                )
+            }
+            Text(
+                text = labelText,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 8.5.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * CLAY ELEMENT TYPE 3: 3D Sculpted Clay Bento Preset Card (Swiggy / Blinkit Bento Block)
+ */
+@Composable
+fun ClayBentoPresetTile(
+    badgeLabel: String,
+    valueTitle: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    accentColor: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val baseSurface = MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        modifier = modifier
+            .claySurface(
+                baseColor = baseSurface,
+                accentColor = accentColor,
+                cornerRadius = 20.dp,
+                bevelDepth = 3.5.dp,
+                isHeroSolid = false
+            )
+            .clickable(onClick = onClick)
+            .padding(13.dp)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = accentColor.copy(alpha = 0.16f)
+                ) {
+                    Text(
+                        text = badgeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = accentColor,
+                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                    )
+                }
+                ClayIconOrb(
+                    icon = icon,
+                    accentColor = accentColor,
+                    orbSize = 30.dp,
+                    iconSize = 16.dp
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = valueTitle,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
