@@ -328,10 +328,83 @@ object ImageProcessor {
         }
     }
 
+    /**
+     * Checks whether a 2-image scan can safely fit on a single A4 ID card sheet (Front + Back layout)
+     * without clipping or requiring excessive shrinkage.
+     *
+     * Returns `true` ONLY when:
+     * 1. Exactly 2 image files exist and have valid dimensions.
+     * 2. Neither image is a portrait full-page document (e.g. Birth Certificate, Marksheet, Letter, Form),
+     *    checked via post-EXIF aspect ratio (`height / width <= 1.05f`).
+     * 3. At the standard A4 card width (`1654 * 0.86f = 1422px`), both images stacked vertically with
+     *    top margin (`120px`), inter-card gap (`70px`), and bottom margin (`100px`) fit within A4 height (`2339px`).
+     *
+     * When this returns `false` (for example, Birth Certificate + PAN Card, or two portrait pages),
+     * the pipeline automatically falls back to a true 2-page Multi-Page PDF (1 document per page).
+     */
+    fun canPairFitOnSingleA4IdSheet(paths: List<String>): Boolean {
+        if (paths.size != 2) return false
+        val a4Width = 1654f
+        val a4Height = 2339f
+        val topMargin = 120f
+        val bottomMargin = 100f
+        val interCardGap = 70f
+        val sidePadding = a4Width * 0.07f
+        val maxCardWidth = a4Width - 2f * sidePadding
+
+        var totalDrawHeight = topMargin + interCardGap + bottomMargin
+        val aspectRatios = mutableListOf<Float>()
+
+        for (path in paths) {
+            val file = File(path)
+            if (!file.exists()) return false
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, opts)
+            var w = opts.outWidth
+            var h = opts.outHeight
+            if (w <= 0 || h <= 0) return false
+
+            try {
+                val exif = ExifInterface(path)
+                when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90,
+                    ExifInterface.ORIENTATION_ROTATE_270,
+                    ExifInterface.ORIENTATION_TRANSPOSE,
+                    ExifInterface.ORIENTATION_TRANSVERSE -> {
+                        val tmp = w
+                        w = h
+                        h = tmp
+                    }
+                }
+            } catch (_: Exception) {}
+
+            val aspectRatio = h.toFloat() / w.toFloat()
+            // Standard horizontal ID cards (PAN, Aadhaar card, Voter ID, DL) have aspect ratio ~0.63.
+            // Any portrait or square-ish page (height / width > 0.90f, such as a Birth Certificate, Marksheet, or Form)
+            // is a full-page document and must get its own dedicated PDF page.
+            if (aspectRatio > 0.90f || aspectRatio < 0.40f) {
+                return false
+            }
+            aspectRatios.add(aspectRatio)
+
+            val scale = maxCardWidth / w.toFloat()
+            val drawH = h.toFloat() * scale
+            totalDrawHeight += drawH
+        }
+
+        // Front and Back of the same ID card have similar aspect ratios.
+        // If the two scans have very different shapes (e.g. a certificate + a PAN card), put them on 2 separate PDF pages.
+        if (aspectRatios.size == 2 && kotlin.math.abs(aspectRatios[0] - aspectRatios[1]) > 0.28f) {
+            return false
+        }
+
+        return totalDrawHeight <= a4Height
+    }
+
     suspend fun combineImagesToA4(paths: List<String>, outputFile: File): File? = withContext(Dispatchers.IO) {
         if (paths.isEmpty()) return@withContext null
         outputFile.parentFile?.mkdirs()
-        if (paths.size < 2) {
+        if (paths.size < 2 || !canPairFitOnSingleA4IdSheet(paths)) {
             return@withContext combineImages(paths, outputFile)
         }
 
@@ -357,15 +430,30 @@ object ImageProcessor {
             val bmp1 = bitmaps[1]  // Back
 
             val topMargin = 120f
+            val bottomMargin = 100f
             val sidePadding = (a4Width * 0.07f)
-            val maxCardWidth = (a4Width - 2 * sidePadding).toInt()
+            val maxCardWidth = (a4Width - 2 * sidePadding)
             val interCardGap = 70f
+            val availableHeight = (a4Height - topMargin - bottomMargin - interCardGap).coerceAtLeast(1f)
+
+            val rawScale0 = maxCardWidth / bmp0.width.toFloat()
+            val rawScale1 = maxCardWidth / bmp1.width.toFloat()
+            val rawH0 = bmp0.height * rawScale0
+            val rawH1 = bmp1.height * rawScale1
+
+            // Zero-clipping guarantee: if combined card heights ever exceed available A4 height,
+            // scale both cards down proportionally and center them horizontally.
+            val heightFitFactor = if (rawH0 + rawH1 > availableHeight) {
+                availableHeight / (rawH0 + rawH1)
+            } else {
+                1f
+            }
 
             // Card 0 (Front)
-            val scale0 = maxCardWidth.toFloat() / bmp0.width.toFloat()
-            val drawW0 = maxCardWidth
-            val drawH0 = (bmp0.height * scale0).toInt().coerceAtLeast(1)
-            val left0 = sidePadding
+            val finalScale0 = rawScale0 * heightFitFactor
+            val drawW0 = (bmp0.width * finalScale0).toInt().coerceAtLeast(1)
+            val drawH0 = (bmp0.height * finalScale0).toInt().coerceAtLeast(1)
+            val left0 = (a4Width - drawW0) / 2f
             val top0 = topMargin
 
             if (drawW0 > 0 && drawH0 > 0) {
@@ -375,10 +463,10 @@ object ImageProcessor {
             bmp0.recycle()
 
             // Card 1 (Back)
-            val scale1 = maxCardWidth.toFloat() / bmp1.width.toFloat()
-            val drawW1 = maxCardWidth
-            val drawH1 = (bmp1.height * scale1).toInt().coerceAtLeast(1)
-            val left1 = sidePadding
+            val finalScale1 = rawScale1 * heightFitFactor
+            val drawW1 = (bmp1.width * finalScale1).toInt().coerceAtLeast(1)
+            val drawH1 = (bmp1.height * finalScale1).toInt().coerceAtLeast(1)
+            val left1 = (a4Width - drawW1) / 2f
             val top1 = top0 + drawH0 + interCardGap
 
             if (drawW1 > 0 && drawH1 > 0) {
@@ -1161,9 +1249,15 @@ object ImageProcessor {
             context.externalCacheDir?.let { extCache ->
                 if (extCache.exists()) totalSize += getFolderSizeRecursively(extCache)
             }
-            // 3. App internal files directory (locally saved document PDFs / JPEGs)
+            // 3. App internal files directory (locally saved document PDFs / JPEGs, excluding internal DataStore preferences)
             context.filesDir?.let { files ->
-                if (files.exists()) totalSize += getFolderSizeRecursively(files)
+                if (files.exists()) {
+                    files.listFiles()?.forEach { child ->
+                        if (!child.name.equals("datastore", ignoreCase = true)) {
+                            totalSize += getFolderSizeRecursively(child)
+                        }
+                    }
+                }
             }
 
             // 4. Public device documents folder (Documents/Dasmo Scan)

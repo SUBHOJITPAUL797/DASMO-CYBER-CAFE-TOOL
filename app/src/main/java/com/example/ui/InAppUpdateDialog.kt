@@ -26,11 +26,15 @@ import com.example.util.UpdateChecker
 import kotlinx.coroutines.launch
 import java.io.File
 
-enum class ScannerUpdateDownloadState {
-    IDLE,
-    DOWNLOADING,
-    DOWNLOADED,
-    ERROR
+sealed interface UpdateDownloadUiState {
+    data object Idle : UpdateDownloadUiState
+    data class Downloading(
+        val progress: Float,
+        val downloadedMb: Double,
+        val totalMb: Double
+    ) : UpdateDownloadUiState
+    data class Downloaded(val apkFile: File) : UpdateDownloadUiState
+    data class Error(val message: String) : UpdateDownloadUiState
 }
 
 @Composable
@@ -41,22 +45,18 @@ fun InAppUpdateDialog(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var downloadState by remember { mutableStateOf(ScannerUpdateDownloadState.IDLE) }
-    var progress by remember { mutableFloatStateOf(0f) }
-    var downloadedMb by remember { mutableDoubleStateOf(0.0) }
-    var totalMb by remember { mutableDoubleStateOf(updateInfo.apkSizeMb) }
-    var downloadedApkFile by remember { mutableStateOf<File?>(null) }
-    var errorMessage by remember { mutableStateOf("") }
+    var uiState by remember { mutableStateOf<UpdateDownloadUiState>(UpdateDownloadUiState.Idle) }
+    val isDownloading = uiState is UpdateDownloadUiState.Downloading
 
     Dialog(
         onDismissRequest = {
-            if (!updateInfo.isCritical && downloadState != ScannerUpdateDownloadState.DOWNLOADING) {
+            if (!updateInfo.isCritical && !isDownloading) {
                 onDismiss()
             }
         },
         properties = DialogProperties(
-            dismissOnBackPress = !updateInfo.isCritical && downloadState != ScannerUpdateDownloadState.DOWNLOADING,
-            dismissOnClickOutside = !updateInfo.isCritical && downloadState != ScannerUpdateDownloadState.DOWNLOADING
+            dismissOnBackPress = !updateInfo.isCritical && !isDownloading,
+            dismissOnClickOutside = !updateInfo.isCritical && !isDownloading
         )
     ) {
         Card(
@@ -195,8 +195,8 @@ fun InAppUpdateDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // Download Progress / Status Bar
-                when (downloadState) {
-                    ScannerUpdateDownloadState.DOWNLOADING -> {
+                when (val state = uiState) {
+                    is UpdateDownloadUiState.Downloading -> {
                         Column(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -212,14 +212,14 @@ fun InAppUpdateDialog(
                                     fontWeight = FontWeight.Medium
                                 )
                                 Text(
-                                    text = "${(progress * 100).toInt()}% (${String.format("%.1f", downloadedMb)} / ${String.format("%.1f", totalMb)} MB)",
+                                    text = "${(state.progress * 100).toInt()}% (${String.format("%.1f", state.downloadedMb)} / ${String.format("%.1f", state.totalMb)} MB)",
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
                             LinearProgressIndicator(
-                                progress = { progress },
+                                progress = { state.progress },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(8.dp)
@@ -229,7 +229,7 @@ fun InAppUpdateDialog(
                             )
                         }
                     }
-                    ScannerUpdateDownloadState.DOWNLOADED -> {
+                    is UpdateDownloadUiState.Downloaded -> {
                         Surface(
                             color = Color(0xFFE8F5E9),
                             shape = RoundedCornerShape(8.dp),
@@ -255,45 +255,50 @@ fun InAppUpdateDialog(
                             }
                         }
                     }
-                    ScannerUpdateDownloadState.ERROR -> {
+                    is UpdateDownloadUiState.Error -> {
                         Surface(
                             color = MaterialTheme.colorScheme.errorContainer,
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = "Download failed: $errorMessage. Tap retry or open in browser.",
+                                text = "Download failed: ${state.message}. Tap retry or open in browser.",
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
                         }
                     }
-                    ScannerUpdateDownloadState.IDLE -> { /* No progress needed */ }
+                    UpdateDownloadUiState.Idle -> { /* No progress needed */ }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
                 val startDownload: () -> Unit = {
-                    downloadState = ScannerUpdateDownloadState.DOWNLOADING
+                    val initialTotalMb = updateInfo.apkSizeMb
+                    uiState = UpdateDownloadUiState.Downloading(
+                        progress = 0f,
+                        downloadedMb = 0.0,
+                        totalMb = initialTotalMb
+                    )
                     scope.launch {
                         val result = UpdateChecker.downloadApk(
                             context = context,
                             downloadUrl = updateInfo.downloadUrl,
                             onProgress = { p, dMb, tMb ->
-                                progress = p
-                                downloadedMb = dMb
-                                totalMb = if (tMb > 0) tMb else totalMb
+                                val currentTotal = (uiState as? UpdateDownloadUiState.Downloading)?.totalMb ?: initialTotalMb
+                                uiState = UpdateDownloadUiState.Downloading(
+                                    progress = p,
+                                    downloadedMb = dMb,
+                                    totalMb = if (tMb > 0) tMb else currentTotal
+                                )
                             }
                         )
                         result.onSuccess { apkFile ->
-                            downloadedApkFile = apkFile
-                            downloadState = ScannerUpdateDownloadState.DOWNLOADED
-                            // Automatically trigger package installer!
+                            uiState = UpdateDownloadUiState.Downloaded(apkFile)
                             UpdateChecker.installApk(context, apkFile)
                         }.onFailure { err ->
-                            errorMessage = err.localizedMessage ?: "Unknown error"
-                            downloadState = ScannerUpdateDownloadState.ERROR
+                            uiState = UpdateDownloadUiState.Error(err.localizedMessage ?: "Unknown error")
                         }
                     }
                 }
@@ -303,7 +308,7 @@ fun InAppUpdateDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (!updateInfo.isCritical && downloadState != ScannerUpdateDownloadState.DOWNLOADING) {
+                    if (!updateInfo.isCritical && !isDownloading) {
                         OutlinedButton(
                             onClick = onDismiss,
                             modifier = Modifier.weight(1f),
@@ -313,8 +318,8 @@ fun InAppUpdateDialog(
                         }
                     }
 
-                    when (downloadState) {
-                        ScannerUpdateDownloadState.IDLE -> {
+                    when (val state = uiState) {
+                        UpdateDownloadUiState.Idle -> {
                             Button(
                                 onClick = startDownload,
                                 modifier = Modifier.weight(1.5f),
@@ -328,7 +333,7 @@ fun InAppUpdateDialog(
                                 Text("Update Now", fontWeight = FontWeight.Bold)
                             }
                         }
-                        ScannerUpdateDownloadState.DOWNLOADING -> {
+                        is UpdateDownloadUiState.Downloading -> {
                             Button(
                                 onClick = {},
                                 enabled = false,
@@ -344,12 +349,10 @@ fun InAppUpdateDialog(
                                 Text("Downloading...")
                             }
                         }
-                        ScannerUpdateDownloadState.DOWNLOADED -> {
+                        is UpdateDownloadUiState.Downloaded -> {
                             Button(
                                 onClick = {
-                                    downloadedApkFile?.let { apkFile ->
-                                        UpdateChecker.installApk(context, apkFile)
-                                    }
+                                    UpdateChecker.installApk(context, state.apkFile)
                                 },
                                 modifier = Modifier.weight(1.5f),
                                 shape = RoundedCornerShape(12.dp),
@@ -362,7 +365,7 @@ fun InAppUpdateDialog(
                                 Text("Install Now", fontWeight = FontWeight.Bold)
                             }
                         }
-                        ScannerUpdateDownloadState.ERROR -> {
+                        is UpdateDownloadUiState.Error -> {
                             OutlinedButton(
                                 onClick = {
                                     UpdateChecker.openUrl(context, updateInfo.downloadUrl)

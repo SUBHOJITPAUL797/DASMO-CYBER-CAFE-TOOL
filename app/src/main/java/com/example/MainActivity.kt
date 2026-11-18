@@ -123,6 +123,79 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+enum class AppScreenTab {
+    DASHBOARD,
+    FILES,
+    CAPTURES,
+    SYNC,
+    APPROVALS,
+    SETTINGS,
+    PASSPORT
+}
+
+sealed interface BottomNavEntry {
+    data object FabSpacer : BottomNavEntry
+    data class TabItem(
+        val tab: AppScreenTab,
+        val label: String,
+        val icon: androidx.compose.ui.graphics.vector.ImageVector
+    ) : BottomNavEntry
+}
+
+enum class CapturesFilterMode {
+    ALL,
+    SYNCED,
+    PENDING
+}
+
+enum class ScanActionType {
+    SINGLE,
+    MULTI,
+    BATCH
+}
+
+sealed interface ScanFlowModalState {
+    data object None : ScanFlowModalState
+    data class TargetSizeWarning(val pendingAction: ScanActionType) : ScanFlowModalState
+    data object BatchSetup : ScanFlowModalState
+    data class ContinuousBatchCamera(val initialPagesPerDoc: Int) : ScanFlowModalState
+}
+
+enum class FolderPickerPurpose {
+    DEFAULT_SYNC_FOLDER,
+    MERGE_DESTINATION_FOLDER
+}
+
+data class MergeDialogState(
+    val fileName: String,
+    val folderName: String,
+    val folderId: String?,
+    val targetSizeKb: String
+)
+
+sealed interface MultiScanSessionState {
+    data object Idle : MultiScanSessionState
+    data class LaunchingInitialScan(val targetEditDocId: Int?) : MultiScanSessionState
+    data class ReviewingPages(val targetEditDocId: Int?) : MultiScanSessionState
+    data class LaunchingAdditionalScan(val targetEditDocId: Int?) : MultiScanSessionState
+
+    val targetEditDocIdOrNull: Int?
+        get() = when (this) {
+            Idle -> null
+            is LaunchingInitialScan -> targetEditDocId
+            is ReviewingPages -> targetEditDocId
+            is LaunchingAdditionalScan -> targetEditDocId
+        }
+}
+
+data class DocumentEditDialogState(
+    val doc: com.example.data.DocumentEntity,
+    val personName: String,
+    val docType: String,
+    val format: com.example.ui.UploadFormat,
+    val replacementPageUris: List<Uri>? = null
+)
+
 @Composable
 fun MainScreen(
     viewModel: HomeViewModel,
@@ -138,6 +211,7 @@ fun MainScreen(
     val showConfirmation by viewModel.showConfirmation.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val statusMessage by viewModel.statusMessage.collectAsStateWithLifecycle()
+    val statusBannerTone by viewModel.statusBannerTone.collectAsStateWithLifecycle()
     val pendingDoc by viewModel.pendingDocument.collectAsStateWithLifecycle()
 
     val authState by viewModel.authState.collectAsStateWithLifecycle()
@@ -182,24 +256,17 @@ fun MainScreen(
     val driveFilesError by viewModel.driveFilesError.collectAsStateWithLifecycle()
 
     var showSizeDialog by remember { mutableStateOf(false) }
-    var showFolderDialog by remember { mutableStateOf(false) }
+    var activeFolderPicker by remember { mutableStateOf<FolderPickerPurpose?>(null) }
     var showBatchPagesSettingDialog by remember { mutableStateOf(false) }
-    var showBatchSetupDialog by remember { mutableStateOf(false) }
-    var folderDialogMode by remember { mutableStateOf("SYNC") } // "SYNC" or "MERGE"
+    var scanFlowModalState by remember { mutableStateOf<ScanFlowModalState>(ScanFlowModalState.None) }
     var showClearJunkWarning by remember { mutableStateOf(false) }
-    var showTargetSizeWarningDialog by remember { mutableStateOf(false) }
-    var pendingScanType by remember { mutableStateOf<String?>(null) } // "SINGLE" or "BATCH" or "MULTI"
     var isFabExpanded by remember { mutableStateOf(false) }
-    var activeTab by remember { mutableStateOf("DASHBOARD") }
+    var activeTab by remember { mutableStateOf(AppScreenTab.DASHBOARD) }
     var searchQuery by remember { mutableStateOf("") }
     var capturesSearchQuery by remember { mutableStateOf("") }
-    var capturesFilterMode by remember { mutableStateOf("ALL") } // "ALL", "SYNCED", "PENDING"
+    var capturesFilterMode by remember { mutableStateOf(CapturesFilterMode.ALL) }
     var selectedDocIds by remember { mutableStateOf(setOf<Int>()) }
-    var showMergeDialog by remember { mutableStateOf(false) }
-    var mergeFileName by remember { mutableStateOf("") }
-    var mergeFolderName by remember { mutableStateOf("") }
-    var mergeFolderId by remember { mutableStateOf<String?>(null) }
-    var mergeTargetSizeKb by remember { mutableStateOf(targetSizeKb.toString()) }
+    var mergeDialogState by remember { mutableStateOf<MergeDialogState?>(null) }
 
     val nameBeforeType by viewModel.nameBeforeType.collectAsStateWithLifecycle()
     val activeQueue by viewModel.activeQueue.collectAsStateWithLifecycle()
@@ -211,11 +278,11 @@ fun MainScreen(
     val scope = rememberCoroutineScope()
     val batchVerificationGroups by viewModel.batchVerificationGroups.collectAsStateWithLifecycle()
 
-    BackHandler(enabled = selectedDocIds.isNotEmpty() || isFabExpanded || activeTab != "DASHBOARD") {
+    BackHandler(enabled = selectedDocIds.isNotEmpty() || isFabExpanded || activeTab != AppScreenTab.DASHBOARD) {
         when {
             selectedDocIds.isNotEmpty() -> selectedDocIds = emptySet()
             isFabExpanded -> isFabExpanded = false
-            activeTab != "DASHBOARD" -> activeTab = "DASHBOARD"
+            activeTab != AppScreenTab.DASHBOARD -> activeTab = AppScreenTab.DASHBOARD
         }
     }
 
@@ -281,7 +348,7 @@ fun MainScreen(
     }
 
     LaunchedEffect(activeTab, googleEmail) {
-        if (activeTab == "FILES" && googleEmail != null) {
+        if (activeTab == AppScreenTab.FILES && googleEmail != null) {
             viewModel.fetchDriveFiles(context)
         }
         viewModel.updatePublicFolderSize()
@@ -330,15 +397,8 @@ fun MainScreen(
     val useA4Format by viewModel.useA4Format.collectAsStateWithLifecycle()
 
     val accumulatedPageUris = remember { mutableStateListOf<Uri>() }
-    var showMultiScanDialog by remember { mutableStateOf(false) }
-    var showContinuousBatchCamera by remember { mutableStateOf(false) }
-
-    var editingDoc by remember { mutableStateOf<com.example.data.DocumentEntity?>(null) }
-    var editPersonName by remember { mutableStateOf("") }
-    var editDocType by remember { mutableStateOf("") }
-    var editFormat by remember { mutableStateOf(com.example.ui.UploadFormat.PDF) }
-    var editScannedUris by remember { mutableStateOf<List<Uri>?>(null) }
-    var editDocIdForScan by remember { mutableStateOf<Int?>(null) }
+    var multiScanSessionState by remember { mutableStateOf<MultiScanSessionState>(MultiScanSessionState.Idle) }
+    var documentEditDialogState by remember { mutableStateOf<DocumentEditDialogState?>(null) }
 
     val scanner = remember(autoEnhanceEnabled) {
         val options = GmsDocumentScannerOptions.Builder()
@@ -362,12 +422,25 @@ fun MainScreen(
     val scannerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
+        val currentTargetEditDocId = multiScanSessionState.targetEditDocIdOrNull
         if (result.resultCode == Activity.RESULT_OK) {
             val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
-            scanResult?.pages?.let { pages ->
+            val pages = scanResult?.pages
+            if (!pages.isNullOrEmpty()) {
                 val imageUris = pages.map { it.imageUri }
                 accumulatedPageUris.addAll(imageUris)
-                showMultiScanDialog = true
+                multiScanSessionState = MultiScanSessionState.ReviewingPages(currentTargetEditDocId)
+            } else if (accumulatedPageUris.isNotEmpty()) {
+                multiScanSessionState = MultiScanSessionState.ReviewingPages(currentTargetEditDocId)
+            } else {
+                multiScanSessionState = MultiScanSessionState.Idle
+            }
+        } else {
+            if (multiScanSessionState is MultiScanSessionState.LaunchingAdditionalScan && accumulatedPageUris.isNotEmpty()) {
+                multiScanSessionState = MultiScanSessionState.ReviewingPages(currentTargetEditDocId)
+            } else {
+                accumulatedPageUris.clear()
+                multiScanSessionState = MultiScanSessionState.Idle
             }
         }
     }
@@ -398,6 +471,7 @@ fun MainScreen(
 
     val launchSingleScan: () -> Unit = {
         accumulatedPageUris.clear()
+        multiScanSessionState = MultiScanSessionState.LaunchingInitialScan(targetEditDocId = null)
         val activity = context.findActivity()
         if (activity != null) {
             scanner.getStartScanIntent(activity)
@@ -405,38 +479,53 @@ fun MainScreen(
                     scannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                 }
                 .addOnFailureListener {
+                    multiScanSessionState = MultiScanSessionState.Idle
                     Toast.makeText(context, "Failed to start scanner: ${it.localizedMessage}", Toast.LENGTH_SHORT).show()
                 }
+        } else {
+            multiScanSessionState = MultiScanSessionState.Idle
         }
     }
 
     val launchAdditionalScan: () -> Unit = {
+        val currentTargetDocId = multiScanSessionState.targetEditDocIdOrNull
+        multiScanSessionState = MultiScanSessionState.LaunchingAdditionalScan(currentTargetDocId)
         val activity = context.findActivity()
         if (activity != null) {
             scanner.getStartScanIntent(activity).addOnSuccessListener { intentSender ->
                 scannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
             }.addOnFailureListener { e ->
+                if (accumulatedPageUris.isNotEmpty()) {
+                    multiScanSessionState = MultiScanSessionState.ReviewingPages(currentTargetDocId)
+                } else {
+                    multiScanSessionState = MultiScanSessionState.Idle
+                }
                 Toast.makeText(context, "Failed to launch scanner: ${e.message}", Toast.LENGTH_LONG).show()
             }
         } else {
+            if (accumulatedPageUris.isNotEmpty()) {
+                multiScanSessionState = MultiScanSessionState.ReviewingPages(currentTargetDocId)
+            } else {
+                multiScanSessionState = MultiScanSessionState.Idle
+            }
             Toast.makeText(context, "Activity context not found", Toast.LENGTH_SHORT).show()
         }
     }
 
     val launchEditScan: (Int) -> Unit = { docId ->
         accumulatedPageUris.clear()
-        editDocIdForScan = docId
+        multiScanSessionState = MultiScanSessionState.LaunchingInitialScan(targetEditDocId = docId)
         val activity = context.findActivity()
         if (activity != null) {
             scanner.getStartScanIntent(activity).addOnSuccessListener { intentSender ->
                 scannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
             }.addOnFailureListener { e ->
                 Toast.makeText(context, "Failed to launch scanner: ${e.message}", Toast.LENGTH_LONG).show()
-                editDocIdForScan = null
+                multiScanSessionState = MultiScanSessionState.Idle
             }
         } else {
             Toast.makeText(context, "Activity context not found", Toast.LENGTH_SHORT).show()
-            editDocIdForScan = null
+            multiScanSessionState = MultiScanSessionState.Idle
         }
     }
 
@@ -472,8 +561,28 @@ fun MainScreen(
         }
     }
 
-    val launchContinuousBatchCamera: () -> Unit = {
-        showContinuousBatchCamera = true
+    val launchContinuousBatchCamera: (Int) -> Unit = { initialPages ->
+        scanFlowModalState = ScanFlowModalState.ContinuousBatchCamera(initialPages)
+    }
+
+    val executeScanAction: (ScanActionType) -> Unit = { actionType ->
+        when (actionType) {
+            ScanActionType.SINGLE -> launchSingleScan()
+            ScanActionType.MULTI -> launchMultiScan()
+            ScanActionType.BATCH -> scanFlowModalState = ScanFlowModalState.BatchSetup
+        }
+    }
+
+    val triggerScanActionWithSizeCheck: (ScanActionType) -> Unit = { actionType ->
+        val lastSizeSub = subfolderAtLastSizeChange
+        val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
+                lastSizeSub != null &&
+                targetSubfolder.trim() != lastSizeSub.trim()
+        if (shouldWarn) {
+            scanFlowModalState = ScanFlowModalState.TargetSizeWarning(actionType)
+        } else {
+            executeScanAction(actionType)
+        }
     }
 
     if (authState != com.example.ui.AuthState.APPROVED) {
@@ -524,10 +633,10 @@ fun MainScreen(
                     style = MaterialTheme.typography.bodyMedium
                 )
             },
-            confirmButton = {
+                    confirmButton = {
                 Button(
                     onClick = {
-                        activeTab = "APPROVALS"
+                        activeTab = AppScreenTab.APPROVALS
                         viewModel.dismissNewRequestNotification()
                     }
                 ) {
@@ -560,13 +669,13 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    if (activeTab == "SETTINGS") {
+                    if (activeTab == AppScreenTab.SETTINGS) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             IconButton(
-                                onClick = { activeTab = "DASHBOARD" },
+                                onClick = { activeTab = AppScreenTab.DASHBOARD },
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(CircleShape)
@@ -617,7 +726,7 @@ fun MainScreen(
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    modifier = Modifier.clickable { activeTab = "SYNC" }
+                                    modifier = Modifier.clickable { activeTab = AppScreenTab.SYNC }
                                 ) {
                                     Box(
                                         modifier = Modifier
@@ -657,7 +766,7 @@ fun MainScreen(
                                 )
                             }
                             IconButton(
-                                onClick = { activeTab = "SETTINGS" },
+                                onClick = { activeTab = AppScreenTab.SETTINGS },
                                 modifier = Modifier
                                     .size(40.dp)
                                     .claySurface(
@@ -693,66 +802,69 @@ fun MainScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val navItems = buildList {
-                        add(Triple("DASHBOARD", "HOME", Icons.Default.Home))
-                        add(Triple("FILES", "DRIVE", Icons.Default.CloudDone))
-                        add(Triple("FAB_SPACER", "", Icons.Default.Add))
-                        add(Triple("CAPTURES", "CAPTURES", Icons.Default.FolderSpecial))
-                        add(Triple("SYNC", "SYNC", Icons.Default.Sync))
+                        add(BottomNavEntry.TabItem(AppScreenTab.DASHBOARD, "HOME", Icons.Default.Home))
+                        add(BottomNavEntry.TabItem(AppScreenTab.FILES, "DRIVE", Icons.Default.CloudDone))
+                        add(BottomNavEntry.FabSpacer)
+                        add(BottomNavEntry.TabItem(AppScreenTab.CAPTURES, "CAPTURES", Icons.Default.FolderSpecial))
+                        add(BottomNavEntry.TabItem(AppScreenTab.SYNC, "SYNC", Icons.Default.Sync))
                         if (isAdmin) {
-                            add(Triple("APPROVALS", "ADMIN", Icons.Default.AdminPanelSettings))
+                            add(BottomNavEntry.TabItem(AppScreenTab.APPROVALS, "ADMIN", Icons.Default.AdminPanelSettings))
                         }
                     }
 
-                    navItems.forEach { (tabId, label, icon) ->
-                        if (tabId == "FAB_SPACER") {
-                            if (activeTab == "DASHBOARD") {
-                                Spacer(modifier = Modifier.weight(0.9f))
+                    navItems.forEach { entry ->
+                        when (entry) {
+                            BottomNavEntry.FabSpacer -> {
+                                if (activeTab == AppScreenTab.DASHBOARD) {
+                                    Spacer(modifier = Modifier.weight(0.9f))
+                                }
                             }
-                        } else {
-                            val isSelected = activeTab == tabId
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable {
-                                        isFabExpanded = false
-                                        activeTab = tabId
-                                    }
-                                    .padding(vertical = 4.dp)
-                            ) {
-                                Box(
-                                    modifier = if (isSelected) {
-                                        Modifier
-                                            .claySurface(
-                                                baseColor = MaterialTheme.colorScheme.primaryContainer,
-                                                accentColor = MaterialTheme.colorScheme.primary,
-                                                cornerRadius = 16.dp,
-                                                bevelDepth = 2.5.dp
-                                            )
-                                            .padding(horizontal = 14.dp, vertical = 4.dp)
-                                    } else {
-                                        Modifier
-                                            .clip(RoundedCornerShape(16.dp))
-                                            .padding(horizontal = 14.dp, vertical = 4.dp)
-                                    },
-                                    contentAlignment = Alignment.Center
+                            is BottomNavEntry.TabItem -> {
+                                val isSelected = activeTab == entry.tab
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable {
+                                            isFabExpanded = false
+                                            activeTab = entry.tab
+                                        }
+                                        .padding(vertical = 4.dp)
                                 ) {
-                                    Icon(
-                                        imageVector = icon,
-                                        contentDescription = label,
-                                        modifier = Modifier.size(20.dp),
-                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    Box(
+                                        modifier = if (isSelected) {
+                                            Modifier
+                                                .claySurface(
+                                                    baseColor = MaterialTheme.colorScheme.primaryContainer,
+                                                    accentColor = MaterialTheme.colorScheme.primary,
+                                                    cornerRadius = 16.dp,
+                                                    bevelDepth = 2.5.dp
+                                                )
+                                                .padding(horizontal = 14.dp, vertical = 4.dp)
+                                        } else {
+                                            Modifier
+                                                .clip(RoundedCornerShape(16.dp))
+                                                .padding(horizontal = 14.dp, vertical = 4.dp)
+                                        },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = entry.icon,
+                                            contentDescription = entry.label,
+                                            modifier = Modifier.size(20.dp),
+                                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = entry.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontSize = 10.sp,
+                                        fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
+                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontSize = 10.sp,
-                                    fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
-                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
                             }
                         }
                     }
@@ -760,7 +872,7 @@ fun MainScreen(
             }
         },
         floatingActionButton = {
-            if (activeTab == "DASHBOARD") {
+            if (activeTab == AppScreenTab.DASHBOARD) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.offset(y = 28.dp)
@@ -779,7 +891,7 @@ fun MainScreen(
                                 androidx.compose.material3.SmallFloatingActionButton(
                                     onClick = {
                                         isFabExpanded = false
-                                        activeTab = "PASSPORT"
+                                        activeTab = AppScreenTab.PASSPORT
                                     },
                                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -798,16 +910,7 @@ fun MainScreen(
                                 androidx.compose.material3.SmallFloatingActionButton(
                                     onClick = {
                                         isFabExpanded = false
-                                        val lastSizeSub = subfolderAtLastSizeChange
-                                        val shouldWarn = targetSubfolder.trim().isNotEmpty() && 
-                                                         lastSizeSub != null && 
-                                                         targetSubfolder.trim() != lastSizeSub.trim()
-                                        if (shouldWarn) {
-                                            pendingScanType = "BATCH"
-                                            showTargetSizeWarningDialog = true
-                                        } else {
-                                            showBatchSetupDialog = true
-                                        }
+                                        triggerScanActionWithSizeCheck(ScanActionType.BATCH)
                                     },
                                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -826,16 +929,7 @@ fun MainScreen(
                                 FloatingActionButton(
                                     onClick = {
                                         isFabExpanded = false
-                                        val lastSizeSub = subfolderAtLastSizeChange
-                                        val shouldWarn = targetSubfolder.trim().isNotEmpty() && 
-                                                         lastSizeSub != null && 
-                                                         targetSubfolder.trim() != lastSizeSub.trim()
-                                        if (shouldWarn) {
-                                            pendingScanType = "MULTI"
-                                            showTargetSizeWarningDialog = true
-                                        } else {
-                                            launchMultiScan()
-                                        }
+                                        triggerScanActionWithSizeCheck(ScanActionType.MULTI)
                                     },
                                     containerColor = MaterialTheme.colorScheme.primary,
                                     contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -856,16 +950,7 @@ fun MainScreen(
                                 androidx.compose.material3.SmallFloatingActionButton(
                                     onClick = {
                                         isFabExpanded = false
-                                        val lastSizeSub = subfolderAtLastSizeChange
-                                        val shouldWarn = targetSubfolder.trim().isNotEmpty() && 
-                                                         lastSizeSub != null && 
-                                                         targetSubfolder.trim() != lastSizeSub.trim()
-                                        if (shouldWarn) {
-                                            pendingScanType = "SINGLE"
-                                            showTargetSizeWarningDialog = true
-                                        } else {
-                                            launchSingleScan()
-                                        }
+                                        triggerScanActionWithSizeCheck(ScanActionType.SINGLE)
                                     },
                                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -910,7 +995,7 @@ fun MainScreen(
                 .background(MaterialTheme.colorScheme.background)
         ) {
             when (activeTab) {
-                "DASHBOARD" -> {
+                AppScreenTab.DASHBOARD -> {
                     val syncedCount = remember(documents) { documents.count { it.isUploaded } }
                     val pendingSyncCount = remember(documents) { documents.count { !it.isUploaded } }
 
@@ -943,8 +1028,8 @@ fun MainScreen(
                                         accentColor = MaterialTheme.colorScheme.primary,
                                         icon = Icons.Default.Description,
                                         onClick = {
-                                            capturesFilterMode = "ALL"
-                                            activeTab = "CAPTURES"
+                                            capturesFilterMode = CapturesFilterMode.ALL
+                                            activeTab = AppScreenTab.CAPTURES
                                         },
                                         modifier = Modifier.weight(1f)
                                     )
@@ -955,8 +1040,8 @@ fun MainScreen(
                                         accentColor = Color(0xFF00C853),
                                         icon = Icons.Default.CloudDone,
                                         onClick = {
-                                            capturesFilterMode = "SYNCED"
-                                            activeTab = "CAPTURES"
+                                            capturesFilterMode = CapturesFilterMode.SYNCED
+                                            activeTab = AppScreenTab.CAPTURES
                                         },
                                         modifier = Modifier.weight(1f)
                                     )
@@ -967,8 +1052,8 @@ fun MainScreen(
                                         accentColor = if (pendingSyncCount > 0) Color(0xFFFF5252) else Color(0xFF64B5F6),
                                         icon = if (pendingSyncCount > 0) Icons.Default.Schedule else Icons.Default.Verified,
                                         onClick = {
-                                            capturesFilterMode = if (pendingSyncCount > 0) "PENDING" else "ALL"
-                                            activeTab = "CAPTURES"
+                                            capturesFilterMode = if (pendingSyncCount > 0) CapturesFilterMode.PENDING else CapturesFilterMode.ALL
+                                            activeTab = AppScreenTab.CAPTURES
                                         },
                                         modifier = Modifier.weight(1f)
                                     )
@@ -1005,18 +1090,7 @@ fun MainScreen(
                                         icon = Icons.Default.DocumentScanner,
                                         accentColor = Color(0xFFFF6D3A),
                                         isHeroFeatured = false,
-                                        onClick = {
-                                            val lastSizeSub = subfolderAtLastSizeChange
-                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
-                                                    lastSizeSub != null &&
-                                                    targetSubfolder.trim() != lastSizeSub.trim()
-                                            if (shouldWarn) {
-                                                pendingScanType = "SINGLE"
-                                                showTargetSizeWarningDialog = true
-                                            } else {
-                                                launchSingleScan()
-                                            }
-                                        },
+                                        onClick = { triggerScanActionWithSizeCheck(ScanActionType.SINGLE) },
                                         modifier = Modifier.weight(1f)
                                     )
 
@@ -1027,18 +1101,7 @@ fun MainScreen(
                                         icon = Icons.Default.LibraryAdd,
                                         accentColor = MaterialTheme.colorScheme.primary,
                                         isHeroFeatured = true,
-                                        onClick = {
-                                            val lastSizeSub = subfolderAtLastSizeChange
-                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
-                                                    lastSizeSub != null &&
-                                                    targetSubfolder.trim() != lastSizeSub.trim()
-                                            if (shouldWarn) {
-                                                pendingScanType = "MULTI"
-                                                showTargetSizeWarningDialog = true
-                                            } else {
-                                                launchMultiScan()
-                                            }
-                                        },
+                                        onClick = { triggerScanActionWithSizeCheck(ScanActionType.MULTI) },
                                         modifier = Modifier.weight(1f)
                                     )
 
@@ -1049,18 +1112,7 @@ fun MainScreen(
                                         icon = Icons.Default.Layers,
                                         accentColor = Color(0xFF00C853),
                                         isHeroFeatured = false,
-                                        onClick = {
-                                            val lastSizeSub = subfolderAtLastSizeChange
-                                            val shouldWarn = targetSubfolder.trim().isNotEmpty() &&
-                                                    lastSizeSub != null &&
-                                                    targetSubfolder.trim() != lastSizeSub.trim()
-                                            if (shouldWarn) {
-                                                pendingScanType = "BATCH"
-                                                showTargetSizeWarningDialog = true
-                                            } else {
-                                                showBatchSetupDialog = true
-                                            }
-                                        },
+                                        onClick = { triggerScanActionWithSizeCheck(ScanActionType.BATCH) },
                                         modifier = Modifier.weight(1f)
                                     )
 
@@ -1071,7 +1123,7 @@ fun MainScreen(
                                         icon = Icons.Default.AccountBox,
                                         accentColor = Color(0xFF7C4DFF),
                                         isHeroFeatured = false,
-                                        onClick = { activeTab = "PASSPORT" },
+                                        onClick = { activeTab = AppScreenTab.PASSPORT },
                                         modifier = Modifier.weight(1f)
                                     )
                                 }
@@ -1112,11 +1164,20 @@ fun MainScreen(
                                 }
                             }
                         } else if (statusMessage.isNotEmpty()) {
+                            val bannerContainerColor = when (statusBannerTone) {
+                                com.example.ui.StatusBannerTone.SUCCESS -> Color(0xFF00E676).copy(alpha = 0.12f)
+                                com.example.ui.StatusBannerTone.WARNING -> Color(0xFFFFB300).copy(alpha = 0.16f)
+                                com.example.ui.StatusBannerTone.INFO -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                com.example.ui.StatusBannerTone.ERROR -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                            }
+                            val bannerTextColor = when (statusBannerTone) {
+                                com.example.ui.StatusBannerTone.SUCCESS -> Color(0xFF00E676)
+                                com.example.ui.StatusBannerTone.WARNING -> Color(0xFFFFB300)
+                                com.example.ui.StatusBannerTone.INFO -> MaterialTheme.colorScheme.primary
+                                com.example.ui.StatusBannerTone.ERROR -> MaterialTheme.colorScheme.error
+                            }
                             Card(
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (statusMessage.contains("Success")) Color(0xFF00E676).copy(alpha = 0.12f)
-                                                     else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
-                                ),
+                                colors = CardDefaults.cardColors(containerColor = bannerContainerColor),
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1131,7 +1192,7 @@ fun MainScreen(
                                         text = statusMessage,
                                         style = MaterialTheme.typography.bodySmall,
                                         fontWeight = FontWeight.Bold,
-                                        color = if (statusMessage.contains("Success")) Color(0xFF00E676) else MaterialTheme.colorScheme.error,
+                                        color = bannerTextColor,
                                         modifier = Modifier.weight(1f)
                                     )
                                     IconButton(onClick = { viewModel.clearStatusMessage() }, modifier = Modifier.size(24.dp)) {
@@ -1189,9 +1250,31 @@ fun MainScreen(
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         activeQueue.forEach { item ->
-                                            val isDone = item.status.contains("Completed") || item.status.contains("locally")
-                                            val isFailed = item.status.contains("Failed")
-                                            val isItemProcessing = !isDone && !isFailed && !item.status.contains("Cancelled")
+                                            val isDone = item.phase == com.example.ui.QueueItemPhase.COMPLETED
+                                            val isLocalNeedsSync = item.phase == com.example.ui.QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC
+                                            val isFailed = item.phase == com.example.ui.QueueItemPhase.FAILED
+                                            val isCancelled = item.phase == com.example.ui.QueueItemPhase.CANCELLED
+                                            val isItemProcessing = item.phase == com.example.ui.QueueItemPhase.PROCESSING
+                                            val canRetryUpload = (isFailed || isLocalNeedsSync) && item.docId != null
+
+                                            val phaseColor = when {
+                                                isDone -> Color(0xFF00E676)
+                                                isLocalNeedsSync -> Color(0xFFFFB300)
+                                                isFailed || isCancelled -> MaterialTheme.colorScheme.error
+                                                else -> MaterialTheme.colorScheme.primary
+                                            }
+                                            val phaseBadgeBg = when {
+                                                isDone -> Color(0xFF00E676).copy(alpha = 0.16f)
+                                                isLocalNeedsSync -> Color(0xFFFFB300).copy(alpha = 0.18f)
+                                                isFailed || isCancelled -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                                                else -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                                            }
+                                            val phaseIcon = when {
+                                                isDone -> Icons.Default.CheckCircle
+                                                isLocalNeedsSync -> Icons.Default.CloudOff
+                                                isFailed || isCancelled -> Icons.Default.Warning
+                                                else -> Icons.Default.Sync
+                                            }
 
                                             Column(
                                                 modifier = Modifier
@@ -1211,13 +1294,9 @@ fun MainScreen(
                                                         modifier = Modifier.weight(1f)
                                                     ) {
                                                         Icon(
-                                                            imageVector = if (isDone) Icons.Default.CheckCircle
-                                                                         else if (isFailed) Icons.Default.Warning
-                                                                         else Icons.Default.Sync,
+                                                            imageVector = phaseIcon,
                                                             contentDescription = "Status Icon",
-                                                            tint = if (isDone) Color(0xFF00E676)
-                                                                   else if (isFailed) MaterialTheme.colorScheme.error
-                                                                   else MaterialTheme.colorScheme.primary,
+                                                            tint = phaseColor,
                                                             modifier = Modifier.size(18.dp)
                                                         )
                                                         Column {
@@ -1243,25 +1322,19 @@ fun MainScreen(
                                                     Box(
                                                         modifier = Modifier
                                                             .clip(RoundedCornerShape(8.dp))
-                                                            .background(
-                                                                if (isDone) Color(0xFF00E676).copy(alpha = 0.16f)
-                                                                else if (isFailed) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                                                                else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                                                            )
+                                                            .background(phaseBadgeBg)
                                                             .padding(horizontal = 8.dp, vertical = 4.dp)
                                                     ) {
                                                         Text(
                                                             text = item.status,
                                                             style = MaterialTheme.typography.labelSmall,
                                                             fontWeight = FontWeight.ExtraBold,
-                                                            color = if (isDone) Color(0xFF00E676)
-                                                                    else if (isFailed) MaterialTheme.colorScheme.error
-                                                                    else MaterialTheme.colorScheme.primary
+                                                            color = phaseColor
                                                         )
                                                     }
                                                 }
 
-                                                if (isFailed && item.docId != null) {
+                                                if (canRetryUpload && item.docId != null) {
                                                     Spacer(modifier = Modifier.height(6.dp))
                                                     Row(
                                                         modifier = Modifier.fillMaxWidth(),
@@ -1273,12 +1346,12 @@ fun MainScreen(
                                                                 Toast.makeText(context, "Resuming upload for ${item.personName}...", Toast.LENGTH_SHORT).show()
                                                             },
                                                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+                                                            border = BorderStroke(1.dp, phaseColor)
                                                         ) {
                                                             Icon(
                                                                 imageVector = Icons.Default.Refresh,
                                                                 contentDescription = "Retry Upload",
-                                                                tint = MaterialTheme.colorScheme.error,
+                                                                tint = phaseColor,
                                                                 modifier = Modifier.size(14.dp)
                                                             )
                                                             Spacer(modifier = Modifier.width(4.dp))
@@ -1286,7 +1359,7 @@ fun MainScreen(
                                                                 text = "Retry Upload",
                                                                 style = MaterialTheme.typography.labelSmall,
                                                                 fontWeight = FontWeight.Bold,
-                                                                color = MaterialTheme.colorScheme.error
+                                                                color = phaseColor
                                                             )
                                                         }
                                                     }
@@ -1340,8 +1413,7 @@ fun MainScreen(
                                         fontWeight = FontWeight.SemiBold,
                                         color = MaterialTheme.colorScheme.primary,
                                         modifier = Modifier.clickable {
-                                            folderDialogMode = "DEFAULT"
-                                            showFolderDialog = true
+                                            activeFolderPicker = FolderPickerPurpose.DEFAULT_SYNC_FOLDER
                                         }
                                     )
                                 }
@@ -1597,7 +1669,7 @@ fun MainScreen(
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { showBatchSetupDialog = true }
+                                        .clickable { scanFlowModalState = ScanFlowModalState.BatchSetup }
                                         .padding(vertical = 4.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
@@ -1761,13 +1833,13 @@ fun MainScreen(
                         Spacer(modifier = Modifier.height(120.dp))
                     }
                 }
-                "CAPTURES" -> {
+                AppScreenTab.CAPTURES -> {
                     val filteredCaptures = remember(documents, capturesSearchQuery, capturesFilterMode) {
                         documents.filter { doc ->
                             val matchesMode = when (capturesFilterMode) {
-                                "SYNCED" -> doc.isUploaded
-                                "PENDING" -> !doc.isUploaded
-                                else -> true
+                                CapturesFilterMode.SYNCED -> doc.isUploaded
+                                CapturesFilterMode.PENDING -> !doc.isUploaded
+                                CapturesFilterMode.ALL -> true
                             }
                             val q = capturesSearchQuery.trim()
                             val matchesSearch = q.isEmpty() ||
@@ -1832,11 +1904,12 @@ fun MainScreen(
                                 }
                                 if (selectedDocIds.size >= 2) {
                                     IconButton(onClick = {
-                                        mergeFileName = "Merged_${System.currentTimeMillis()}"
-                                        mergeFolderName = ""
-                                        mergeFolderId = null
-                                        mergeTargetSizeKb = targetSizeKb.toString()
-                                        showMergeDialog = true
+                                        mergeDialogState = MergeDialogState(
+                                            fileName = "Merged_${System.currentTimeMillis()}",
+                                            folderName = "",
+                                            folderId = null,
+                                            targetSizeKb = targetSizeKb.toString()
+                                        )
                                     }) {
                                         Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = "Merge to PDF", tint = MaterialTheme.colorScheme.primary)
                                     }
@@ -1897,9 +1970,9 @@ fun MainScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 listOf(
-                                    "ALL" to "All (${documents.size})",
-                                    "SYNCED" to "Synced (${documents.count { it.isUploaded }})",
-                                    "PENDING" to "Pending (${documents.count { !it.isUploaded }})"
+                                    CapturesFilterMode.ALL to "All (${documents.size})",
+                                    CapturesFilterMode.SYNCED to "Synced (${documents.count { it.isUploaded }})",
+                                    CapturesFilterMode.PENDING to "Pending (${documents.count { !it.isUploaded }})"
                                 ).forEach { (mode, label) ->
                                     val isSelected = capturesFilterMode == mode
                                     FilterChip(
@@ -1984,10 +2057,10 @@ fun MainScreen(
                         }
                     }
                 }
-                "PASSPORT" -> {
-                    com.example.ui.PassportPhotoScreen(onBack = { activeTab = "DASHBOARD" })
+                AppScreenTab.PASSPORT -> {
+                    com.example.ui.PassportPhotoScreen(onBack = { activeTab = AppScreenTab.DASHBOARD })
                 }
-                "APPROVALS" -> {
+                AppScreenTab.APPROVALS -> {
                     val dbLogs by viewModel.dbLogs.collectAsStateWithLifecycle()
                     AdminDashboardScreen(
                         allUsers = allUsers,
@@ -2005,7 +2078,7 @@ fun MainScreen(
                         onClearLogs = { viewModel.clearDbLogs() }
                     )
                 }
-                "FILES" -> {
+                AppScreenTab.FILES -> {
                     if (googleEmail == null) {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
@@ -2183,7 +2256,7 @@ fun MainScreen(
                                             style = MaterialTheme.typography.bodyMedium,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                         )
-                                        Button(onClick = { activeTab = "SYNC" }) {
+                                        Button(onClick = { activeTab = AppScreenTab.SYNC }) {
                                             Text("Go to Sync Settings")
                                         }
                                     }
@@ -2235,7 +2308,7 @@ fun MainScreen(
                         }
                     }
                 }
-                "SYNC" -> {
+                AppScreenTab.SYNC -> {
                     val scrollState = rememberScrollState()
                     Column(
                         modifier = Modifier
@@ -2346,8 +2419,7 @@ fun MainScreen(
                                         }
                                         Button(
                                             onClick = {
-                                                folderDialogMode = "SYNC"
-                                                showFolderDialog = true
+                                                activeFolderPicker = FolderPickerPurpose.DEFAULT_SYNC_FOLDER
                                             },
                                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer, contentColor = MaterialTheme.colorScheme.onSecondaryContainer)
                                         ) {
@@ -2619,7 +2691,7 @@ fun MainScreen(
                         }
                     }
                 }
-                "SETTINGS" -> {
+                AppScreenTab.SETTINGS -> {
                     val scrollState = rememberScrollState()
                     Column(
                         modifier = Modifier
@@ -3204,12 +3276,13 @@ fun MainScreen(
         )
     }
 
-    if (showTargetSizeWarningDialog) {
+    val activeTargetSizeWarning = scanFlowModalState as? ScanFlowModalState.TargetSizeWarning
+    if (activeTargetSizeWarning != null) {
+        val pendingAction = activeTargetSizeWarning.pendingAction
         var sizeInput by remember { mutableStateOf(targetSizeKb.toString()) }
         AlertDialog(
-            onDismissRequest = { 
-                showTargetSizeWarningDialog = false 
-                pendingScanType = null
+            onDismissRequest = {
+                scanFlowModalState = ScanFlowModalState.None
             },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3274,15 +3347,8 @@ fun MainScreen(
                     TextButton(
                         onClick = {
                             viewModel.setSubfolderAtLastSizeChange(targetSubfolder)
-                            showTargetSizeWarningDialog = false
-                            if (pendingScanType == "SINGLE") {
-                                launchSingleScan()
-                            } else if (pendingScanType == "BATCH") {
-                                showBatchSetupDialog = true
-                            } else if (pendingScanType == "MULTI") {
-                                launchMultiScan()
-                            }
-                            pendingScanType = null
+                            scanFlowModalState = ScanFlowModalState.None
+                            executeScanAction(pendingAction)
                         },
                         modifier = Modifier.weight(1f)
                     ) {
@@ -3295,15 +3361,8 @@ fun MainScreen(
                                     viewModel.updateTargetSize(size)
                                 }
                             }
-                            showTargetSizeWarningDialog = false
-                            if (pendingScanType == "SINGLE") {
-                                launchSingleScan()
-                            } else if (pendingScanType == "BATCH") {
-                                showBatchSetupDialog = true
-                            } else if (pendingScanType == "MULTI") {
-                                launchMultiScan()
-                            }
-                            pendingScanType = null
+                            scanFlowModalState = ScanFlowModalState.None
+                            executeScanAction(pendingAction)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         modifier = Modifier.weight(1f)
@@ -3313,9 +3372,8 @@ fun MainScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { 
-                    showTargetSizeWarningDialog = false 
-                    pendingScanType = null
+                TextButton(onClick = {
+                    scanFlowModalState = ScanFlowModalState.None
                 }) {
                     Text("Cancel")
                 }
@@ -3323,9 +3381,10 @@ fun MainScreen(
         )
     }
 
-    if (showMergeDialog) {
+    val currentMergeDialog = mergeDialogState
+    if (currentMergeDialog != null) {
         AlertDialog(
-            onDismissRequest = { showMergeDialog = false },
+            onDismissRequest = { mergeDialogState = null },
             title = {
                 Text(
                     text = "Merge to PDF",
@@ -3341,15 +3400,15 @@ fun MainScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
-                        value = mergeFileName,
-                        onValueChange = { mergeFileName = it },
+                        value = currentMergeDialog.fileName,
+                        onValueChange = { mergeDialogState = currentMergeDialog.copy(fileName = it) },
                         label = { Text("File Name") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
-                        value = mergeTargetSizeKb,
-                        onValueChange = { mergeTargetSizeKb = it },
+                        value = currentMergeDialog.targetSizeKb,
+                        onValueChange = { mergeDialogState = currentMergeDialog.copy(targetSizeKb = it) },
                         label = { Text("Target Size (KB)") },
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
                         singleLine = true,
@@ -3358,8 +3417,7 @@ fun MainScreen(
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier.fillMaxWidth().clickable {
-                            folderDialogMode = "MERGE"
-                            showFolderDialog = true
+                            activeFolderPicker = FolderPickerPurpose.MERGE_DESTINATION_FOLDER
                         }
                     ) {
                         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3367,13 +3425,13 @@ fun MainScreen(
                             Spacer(modifier = Modifier.width(8.dp))
                             Column {
                                 Text(
-                                    text = if (mergeFolderId != null) mergeFolderName else "Select Drive Folder",
+                                    text = if (currentMergeDialog.folderId != null) currentMergeDialog.folderName else "Select Drive Folder",
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    text = if (mergeFolderId != null) "Folder Selected" else "Tap to choose destination",
+                                    text = if (currentMergeDialog.folderId != null) "Folder Selected" else "Tap to choose destination",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -3384,30 +3442,32 @@ fun MainScreen(
             },
             confirmButton = {
                 Button(onClick = {
-                    val finalSize = mergeTargetSizeKb.toIntOrNull() ?: targetSizeKb
+                    val finalSize = currentMergeDialog.targetSizeKb.toIntOrNull() ?: targetSizeKb
                     viewModel.mergeDocumentsToPdf(
                         context = context,
                         docIds = selectedDocIds,
-                        fileName = if (mergeFileName.isNotBlank()) mergeFileName else "Merged_${System.currentTimeMillis()}",
-                        folderId = mergeFolderId,
-                        folderName = mergeFolderName,
+                        fileName = if (currentMergeDialog.fileName.isNotBlank()) currentMergeDialog.fileName else "Merged_${System.currentTimeMillis()}",
+                        folderId = currentMergeDialog.folderId,
+                        folderName = currentMergeDialog.folderName,
                         targetSizeKb = finalSize
                     )
-                    showMergeDialog = false
+                    mergeDialogState = null
                     selectedDocIds = setOf()
                 }) {
                     Text("Merge")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showMergeDialog = false }) {
+                TextButton(onClick = { mergeDialogState = null }) {
                     Text("Cancel")
                 }
             }
         )
     }
 
-    if (showMultiScanDialog) {
+    val activeReviewSession = multiScanSessionState as? MultiScanSessionState.ReviewingPages
+    if (activeReviewSession != null) {
+        val targetEditDocId = activeReviewSession.targetEditDocId
         androidx.compose.ui.window.Dialog(
             onDismissRequest = {
                 // Do not dismiss on click outside to prevent accidental loss
@@ -3434,7 +3494,7 @@ fun MainScreen(
                             modifier = Modifier.size(28.dp)
                         )
                         Text(
-                            text = "Multi-Page Scan",
+                            text = if (targetEditDocId != null) "Replace Document Pages" else "Multi-Page Scan",
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.Bold
                         )
@@ -3492,8 +3552,7 @@ fun MainScreen(
                                         .clickable {
                                             accumulatedPageUris.removeAt(index)
                                             if (accumulatedPageUris.isEmpty()) {
-                                                showMultiScanDialog = false
-                                                editDocIdForScan = null
+                                                multiScanSessionState = MultiScanSessionState.Idle
                                             }
                                         },
                                     contentAlignment = Alignment.Center
@@ -3515,7 +3574,6 @@ fun MainScreen(
                     ) {
                         Button(
                             onClick = {
-                                showMultiScanDialog = false
                                 launchAdditionalScan()
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -3532,11 +3590,15 @@ fun MainScreen(
 
                         Button(
                             onClick = {
-                                showMultiScanDialog = false
-                                if (editDocIdForScan != null) {
-                                    editScannedUris = accumulatedPageUris.toList()
+                                multiScanSessionState = MultiScanSessionState.Idle
+                                if (targetEditDocId != null) {
+                                    val scannedReplacementUris = accumulatedPageUris.toList()
                                     accumulatedPageUris.clear()
-                                    editDocIdForScan = null
+                                    documentEditDialogState = documentEditDialogState?.let { currentEdit ->
+                                        if (currentEdit.doc.id == targetEditDocId) {
+                                            currentEdit.copy(replacementPageUris = scannedReplacementUris)
+                                        } else currentEdit
+                                    }
                                 } else {
                                     val uris = accumulatedPageUris.toList()
                                     val overrideFormat = if (uris.size > 1) UploadFormat.PDF else null
@@ -3558,9 +3620,8 @@ fun MainScreen(
 
                         OutlinedButton(
                             onClick = {
-                                showMultiScanDialog = false
                                 accumulatedPageUris.clear()
-                                editDocIdForScan = null
+                                multiScanSessionState = MultiScanSessionState.Idle
                             },
                             modifier = Modifier.fillMaxWidth(),
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
@@ -3733,14 +3794,14 @@ fun MainScreen(
         }
     }
 
-    if (showBatchSetupDialog) {
+    if (scanFlowModalState == ScanFlowModalState.BatchSetup) {
         var selectedPages by remember { mutableIntStateOf(batchPagesPerDoc) }
         var showCustomInputInSetup by remember { mutableStateOf(batchPagesPerDoc > 4) }
         var customPagesText by remember { mutableStateOf(if (batchPagesPerDoc > 4) batchPagesPerDoc.toString() else "5") }
         var rememberAsDefault by remember { mutableStateOf(true) }
 
         androidx.compose.ui.window.Dialog(
-            onDismissRequest = { showBatchSetupDialog = false },
+            onDismissRequest = { scanFlowModalState = ScanFlowModalState.None },
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
         ) {
             Surface(
@@ -3787,7 +3848,7 @@ fun MainScreen(
                             }
                         }
                         IconButton(
-                            onClick = { showBatchSetupDialog = false },
+                            onClick = { scanFlowModalState = ScanFlowModalState.None },
                             modifier = Modifier.size(32.dp)
                         ) {
                             Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3980,8 +4041,7 @@ fun MainScreen(
                                 if (rememberAsDefault) {
                                     viewModel.updateBatchPagesPerDoc(finalPages)
                                 }
-                                showBatchSetupDialog = false
-                                launchContinuousBatchCamera()
+                                launchContinuousBatchCamera(finalPages)
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                             shape = RoundedCornerShape(12.dp),
@@ -4004,7 +4064,7 @@ fun MainScreen(
                                 if (rememberAsDefault) {
                                     viewModel.updateBatchPagesPerDoc(finalPages)
                                 }
-                                showBatchSetupDialog = false
+                                scanFlowModalState = ScanFlowModalState.None
                                 launchBatchScan()
                             },
                             shape = RoundedCornerShape(12.dp),
@@ -4021,12 +4081,13 @@ fun MainScreen(
         }
     }
 
-    if (showContinuousBatchCamera) {
+    val activeBatchCameraModal = scanFlowModalState as? ScanFlowModalState.ContinuousBatchCamera
+    if (activeBatchCameraModal != null) {
         com.example.ui.BatchCameraScanScreen(
-            onDismiss = { showContinuousBatchCamera = false },
-            initialPagesPerDoc = sessionBatchPagesPerDoc,
+            onDismiss = { scanFlowModalState = ScanFlowModalState.None },
+            initialPagesPerDoc = activeBatchCameraModal.initialPagesPerDoc,
             onFinishBatch = { uris, pagesPerDoc ->
-                showContinuousBatchCamera = false
+                scanFlowModalState = ScanFlowModalState.None
                 viewModel.processBatchScannedImages(uris, pagesPerDoc)
             }
         )
@@ -4497,7 +4558,8 @@ fun MainScreen(
         )
     }
 
-    if (showFolderDialog) {
+    val currentFolderPickerPurpose = activeFolderPicker
+    if (currentFolderPickerPurpose != null) {
         var showNewFolderInput by remember { mutableStateOf(false) }
         var newFolderNameInput by remember { mutableStateOf("") }
         var folderSearchQuery by remember { mutableStateOf("") }
@@ -4513,7 +4575,7 @@ fun MainScreen(
         }
 
         AlertDialog(
-            onDismissRequest = { showFolderDialog = false },
+            onDismissRequest = { activeFolderPicker = null },
             title = {
                 Text(
                     text = "Select Drive Destination",
@@ -4531,10 +4593,6 @@ fun MainScreen(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-
-                    // Google Security Notice Card (Removed)
-
-// Removed debug diagnostics button
 
                     if (folderError != null) {
                         Card(
@@ -4758,13 +4816,18 @@ fun MainScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        if (folderDialogMode == "MERGE") {
-                            mergeFolderId = currentFolderId
-                            mergeFolderName = currentFolderName ?: "Selected Folder"
-                        } else {
-                            viewModel.selectCurrentAsDestination()
+                        when (currentFolderPickerPurpose) {
+                            FolderPickerPurpose.MERGE_DESTINATION_FOLDER -> {
+                                mergeDialogState = mergeDialogState?.copy(
+                                    folderId = currentFolderId,
+                                    folderName = currentFolderName ?: "Selected Folder"
+                                )
+                            }
+                            FolderPickerPurpose.DEFAULT_SYNC_FOLDER -> {
+                                viewModel.selectCurrentAsDestination()
+                            }
                         }
-                        showFolderDialog = false
+                        activeFolderPicker = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                 ) {
@@ -4773,7 +4836,7 @@ fun MainScreen(
             },
             dismissButton = {
                 TextButton(
-                    onClick = { showFolderDialog = false }
+                    onClick = { activeFolderPicker = null }
                 ) {
                     Text("Close")
                 }
@@ -4893,12 +4956,14 @@ fun MainScreen(
                 Button(
                     onClick = {
                         val targetDoc = selectedPreviewDoc!!
-                        editingDoc = targetDoc
-                        editPersonName = targetDoc.personName
-                        editDocType = targetDoc.documentType
-                        editFormat = if (targetDoc.fileName.endsWith(".pdf", ignoreCase = true)) com.example.ui.UploadFormat.PDF else com.example.ui.UploadFormat.JPEG
-                        editScannedUris = null
-                        editDocIdForScan = null
+                        documentEditDialogState = DocumentEditDialogState(
+                            doc = targetDoc,
+                            personName = targetDoc.personName,
+                            docType = targetDoc.documentType,
+                            format = if (targetDoc.fileName.endsWith(".pdf", ignoreCase = true)) com.example.ui.UploadFormat.PDF else com.example.ui.UploadFormat.JPEG,
+                            replacementPageUris = null
+                        )
+                        multiScanSessionState = MultiScanSessionState.Idle
                         selectedPreviewDoc = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
@@ -4915,10 +4980,11 @@ fun MainScreen(
         )
     }
 
-    if (editingDoc != null) {
-        val doc = editingDoc!!
+    val currentEditDialog = documentEditDialogState
+    if (currentEditDialog != null) {
+        val doc = currentEditDialog.doc
         AlertDialog(
-            onDismissRequest = { editingDoc = null },
+            onDismissRequest = { documentEditDialogState = null },
             title = {
                 Text(
                     text = "Edit Document & Replace File",
@@ -4933,8 +4999,8 @@ fun MainScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     OutlinedTextField(
-                        value = editPersonName,
-                        onValueChange = { editPersonName = it },
+                        value = currentEditDialog.personName,
+                        onValueChange = { documentEditDialogState = currentEditDialog.copy(personName = it) },
                         label = { Text("Person Name") },
                         placeholder = { Text("e.g., John Doe") },
                         singleLine = true,
@@ -4942,8 +5008,8 @@ fun MainScreen(
                     )
 
                     OutlinedTextField(
-                        value = editDocType,
-                        onValueChange = { editDocType = it },
+                        value = currentEditDialog.docType,
+                        onValueChange = { documentEditDialogState = currentEditDialog.copy(docType = it) },
                         label = { Text("Document Type") },
                         placeholder = { Text("e.g., Passport, Invoice") },
                         singleLine = true,
@@ -4968,23 +5034,23 @@ fun MainScreen(
                                     .weight(1f)
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(
-                                        if (editFormat == format) MaterialTheme.colorScheme.primaryContainer 
+                                        if (currentEditDialog.format == format) MaterialTheme.colorScheme.primaryContainer 
                                         else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                                     )
-                                    .clickable { editFormat = format }
+                                    .clickable { documentEditDialogState = currentEditDialog.copy(format = format) }
                                     .padding(vertical = 8.dp),
                                 horizontalArrangement = Arrangement.Center
                             ) {
                                 RadioButton(
-                                    selected = (editFormat == format),
-                                    onClick = { editFormat = format }
+                                    selected = (currentEditDialog.format == format),
+                                    onClick = { documentEditDialogState = currentEditDialog.copy(format = format) }
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                                 Text(
                                     text = format.name,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (editFormat == format) MaterialTheme.colorScheme.onPrimaryContainer 
+                                    color = if (currentEditDialog.format == format) MaterialTheme.colorScheme.onPrimaryContainer 
                                             else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
@@ -4993,7 +5059,7 @@ fun MainScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                    if (editScannedUris == null) {
+                    if (currentEditDialog.replacementPageUris == null) {
                         Button(
                             onClick = { launchEditScan(doc.id) },
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
@@ -5023,7 +5089,7 @@ fun MainScreen(
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Text(
-                                text = "📄 ${editScannedUris!!.size} new page(s) scanned to replace file!",
+                                text = "📄 ${currentEditDialog.replacementPageUris.size} new page(s) scanned to replace file!",
                                 style = MaterialTheme.typography.bodyMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -5047,12 +5113,12 @@ fun MainScreen(
                         viewModel.updateAndUploadDocument(
                             context = context,
                             docId = doc.id,
-                            personName = editPersonName,
-                            documentType = editDocType,
-                            format = editFormat,
-                            newPageUris = editScannedUris
+                            personName = currentEditDialog.personName,
+                            documentType = currentEditDialog.docType,
+                            format = currentEditDialog.format,
+                            newPageUris = currentEditDialog.replacementPageUris
                         )
-                        editingDoc = null
+                        documentEditDialogState = null
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50)),
                     modifier = Modifier.height(48.dp)
@@ -5062,7 +5128,7 @@ fun MainScreen(
             },
             dismissButton = {
                 TextButton(
-                    onClick = { editingDoc = null },
+                    onClick = { documentEditDialogState = null },
                     modifier = Modifier.height(48.dp)
                 ) {
                     Text("Cancel", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)

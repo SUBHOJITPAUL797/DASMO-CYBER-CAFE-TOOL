@@ -66,6 +66,25 @@ enum class UploadFormat {
     BOTH
 }
 
+enum class QueueItemPhase {
+    PROCESSING,
+    AWAITING_CONFIRMATION,
+    COMPLETED,
+    SAVED_LOCALLY_NEEDS_SYNC,
+    FAILED,
+    CANCELLED;
+
+    val isTerminal: Boolean
+        get() = this == COMPLETED || this == SAVED_LOCALLY_NEEDS_SYNC || this == FAILED || this == CANCELLED
+}
+
+enum class StatusBannerTone {
+    INFO,
+    SUCCESS,
+    WARNING,
+    ERROR
+}
+
 data class PendingDocument(
     val queueId: String,
     val compressedFile: File,
@@ -317,7 +336,7 @@ class HomeViewModel(
                 }.addOnFailureListener { e ->
                     Log.e("HomeViewModel", "Failed to register record for $normalizedEmail", e)
                     addDbLog("Error registering user record: ${e.localizedMessage}")
-                    _statusMessage.value = "Registration sync warning: ${e.localizedMessage}"
+                    postStatusMessage("Registration sync warning: ${e.localizedMessage}", StatusBannerTone.WARNING)
                 }
 
                 if (isAdminEmail) {
@@ -341,7 +360,7 @@ class HomeViewModel(
         usersListenerRegistration = firestore.collection("dasmo_scanner_users").addSnapshotListener { snapshot, e ->
             if (e != null) {
                 addDbLog("listenToAllUsers ERROR: ${e.message}")
-                _statusMessage.value = "Error loading users: ${e.message}"
+                postStatusMessage("Error loading users: ${e.message}", StatusBannerTone.ERROR)
                 return@addSnapshotListener
             }
             if (snapshot != null) {
@@ -402,7 +421,7 @@ class HomeViewModel(
     fun toggleUserApproval(email: String, currentStatus: Boolean) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         val newApproved = !currentStatus
@@ -419,7 +438,7 @@ class HomeViewModel(
     fun approveUser(email: String) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
@@ -429,16 +448,16 @@ class HomeViewModel(
             "dasmo_status", "approved",
             "adminKey", ADMIN_SECURITY_KEY
         ).addOnSuccessListener {
-            _statusMessage.value = "User $email approved successfully!"
+            postStatusMessage("User $email approved successfully!", StatusBannerTone.SUCCESS)
         }.addOnFailureListener { e ->
-            _statusMessage.value = "Failed to approve $email: ${e.localizedMessage}"
+            postStatusMessage("Failed to approve $email: ${e.localizedMessage}", StatusBannerTone.ERROR)
         }
     }
 
     fun declineUser(email: String) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
@@ -448,7 +467,7 @@ class HomeViewModel(
             "dasmo_status", "rejected",
             "adminKey", ADMIN_SECURITY_KEY
         ).addOnSuccessListener {
-            _statusMessage.value = "User $email access revoked."
+            postStatusMessage("User $email access revoked.", StatusBannerTone.WARNING)
         }
     }
 
@@ -458,7 +477,7 @@ class HomeViewModel(
     fun revokeUserDevice(email: String) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
@@ -474,14 +493,14 @@ class HomeViewModel(
                 "adminKey" to ADMIN_SECURITY_KEY
             )
         ).addOnSuccessListener {
-            _statusMessage.value = "Device lock reset for $email. User can now bind a new device."
+            postStatusMessage("Device lock reset for $email. User can now bind a new device.", StatusBannerTone.SUCCESS)
         }
     }
 
     fun updateUserExpiry(email: String, expiryTimestamp: Long) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         firestore.collection("dasmo_scanner_users").document(email.trim().lowercase()).update(
@@ -490,21 +509,21 @@ class HomeViewModel(
                 "adminKey" to ADMIN_SECURITY_KEY
             )
         ).addOnSuccessListener {
-            _statusMessage.value = "Updated access plan duration for $email."
+            postStatusMessage("Updated access plan duration for $email.", StatusBannerTone.SUCCESS)
         }
     }
 
     fun deleteUser(email: String) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         val docRef = firestore.collection("dasmo_scanner_users").document(email.trim().lowercase())
         docRef.update("status", "deleted", "adminKey", ADMIN_SECURITY_KEY)
             .addOnCompleteListener {
                 docRef.delete().addOnSuccessListener {
-                    _statusMessage.value = "Deleted user $email from database."
+                    postStatusMessage("Deleted user $email from database.", StatusBannerTone.WARNING)
                 }
             }
     }
@@ -512,7 +531,7 @@ class HomeViewModel(
     fun createUserManually(email: String, role: String, status: String, expiryTimestamp: Long = 0L) {
         val currentLoggedInEmail = googleEmail.value?.trim()?.lowercase() ?: ""
         if (currentLoggedInEmail != "subhojitpaul26042004@gmail.com") {
-            _statusMessage.value = "Unauthorized action!"
+            postStatusMessage("Unauthorized action!", StatusBannerTone.ERROR)
             return
         }
         val trimmed = email.trim().lowercase()
@@ -537,7 +556,7 @@ class HomeViewModel(
         )
         firestore.collection("dasmo_scanner_users").document(trimmed).set(doc, com.google.firebase.firestore.SetOptions.merge())
             .addOnSuccessListener {
-                _statusMessage.value = "Created and pre-approved account for $trimmed."
+                postStatusMessage("Created and pre-approved account for $trimmed.", StatusBannerTone.SUCCESS)
             }
     }
 
@@ -700,7 +719,8 @@ class HomeViewModel(
         val personName: String,
         val documentType: String,
         val format: UploadFormat,
-        val status: String, // "Analyzing (NVIDIA AI)...", "Uploading PDF/JPEG...", "Completed", "Failed"
+        val status: String,
+        val phase: QueueItemPhase = QueueItemPhase.PROCESSING,
         val timestamp: Long = System.currentTimeMillis(),
         val docId: Int? = null
     )
@@ -709,9 +729,9 @@ class HomeViewModel(
     val activeQueue = _activeQueue.asStateFlow()
 
     fun clearActiveQueue() {
-        _activeQueue.update { q -> q.filter { 
-            !it.status.contains("Completed") && !it.status.contains("locally") && !it.status.contains("Failed") 
-        } }
+        _activeQueue.update { q ->
+            q.filter { !it.phase.isTerminal }
+        }
     }
 
     val nameBeforeType = settingsRepository.nameBeforeType
@@ -729,8 +749,28 @@ class HomeViewModel(
     private val _statusMessage = MutableStateFlow("")
     val statusMessage = _statusMessage.asStateFlow()
 
+    private val _statusBannerTone = MutableStateFlow(StatusBannerTone.INFO)
+    val statusBannerTone = _statusBannerTone.asStateFlow()
+
+    private fun postStatusMessage(message: String, tone: StatusBannerTone = inferBannerTone(message)) {
+        _statusMessage.value = message
+        _statusBannerTone.value = tone
+    }
+
+    private fun inferBannerTone(message: String): StatusBannerTone {
+        if (message.isBlank()) return StatusBannerTone.INFO
+        val lower = message.lowercase()
+        return when {
+            lower.contains("error") || lower.contains("failed") || lower.contains("unauthorized") -> StatusBannerTone.ERROR
+            lower.contains("warning") || lower.contains("saved locally") || lower.contains("revoked") || lower.contains("deleted") -> StatusBannerTone.WARNING
+            lower.contains("success") || lower.contains("approved") || lower.contains("complete") || lower.contains("reset") || lower.contains("updated") || lower.contains("created") -> StatusBannerTone.SUCCESS
+            else -> StatusBannerTone.INFO
+        }
+    }
+
     fun clearStatusMessage() {
         _statusMessage.value = ""
+        _statusBannerTone.value = StatusBannerTone.INFO
     }
 
     fun runDiagnostics() {
@@ -960,11 +1000,12 @@ class HomeViewModel(
             if (item.id == pending.queueId) {
                 item.copy(
                     format = format ?: item.format,
-                    status = "Cancelled"
+                    status = "Cancelled",
+                    phase = QueueItemPhase.CANCELLED
                 )
             } else item
         } }
-        _statusMessage.value = ""
+        clearStatusMessage()
         _isProcessing.value = false
     }
 
@@ -1235,50 +1276,25 @@ class HomeViewModel(
                 personName = "New Multi-Scan",
                 documentType = "Document",
                 format = format,
-                status = "Processing multi-scan pages..."
+                status = "Processing multi-scan pages...",
+                phase = QueueItemPhase.PROCESSING
             )
             _activeQueue.update { it + initialItem }
 
             try {
-                _statusMessage.value = "Copying page images..."
-                updateQueueStatus(queueId, "Copying page images...")
+                postStatusMessage("Copying page images...", StatusBannerTone.INFO)
+                updateQueueStatus(queueId, "Copying page images...", QueueItemPhase.PROCESSING)
                 val pageFiles = imageUris.mapIndexed { index, uri ->
                     val file = File(context.cacheDir, "multi_page_${java.util.UUID.randomUUID()}_$index.jpeg")
                     ImageProcessor.fixImageOrientation(context, uri, file)
                 }
 
-                _statusMessage.value = "Creating preview image..."
-                updateQueueStatus(queueId, "Creating preview image...")
-                val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
-                // A4 Sheet Canvas: strictly for exactly 2 pages when the user enabled the A4 format toggle.
-                // OFF → clean vertical stacking (combineImages); ON → A4 xerox layout (combineImagesToA4).
-                val isId = imageUris.size == 2 && useA4Format.value
-                val resultFile = if (isId) {
-                    ImageProcessor.combineImagesToA4(pageFiles.map { it.absolutePath }, combinedFile)
-                } else {
-                    ImageProcessor.combineImages(pageFiles.map { it.absolutePath }, combinedFile)
-                }
-                
-                if (resultFile == null) {
-                    _statusMessage.value = "Failed to combine images"
-                    updateQueueStatus(queueId, "Failed: Combined empty")
-                    _isProcessing.value = false
-                    return
-                }
-
-                val targetKb = targetSizeKb.value
-                _statusMessage.value = "Compressing preview..."
-                updateQueueStatus(queueId, "Compressing preview...")
-                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
-                
-                try { resultFile.delete() } catch (e: Exception) {}
-
-                _statusMessage.value = "Analyzing first page with AI..."
-                updateQueueStatus(queueId, "Analyzing first page...")
+                postStatusMessage("Analyzing pages with AI...", StatusBannerTone.INFO)
+                updateQueueStatus(queueId, "Analyzing pages...", QueueItemPhase.PROCESSING)
                 val firstPageFile = pageFiles.first()
                 var personName = "Unknown"
                 var documentType = "Document"
-                
+
                 if (enableAiAnalysis.value) {
                     var analyzed = false
                     try {
@@ -1316,6 +1332,53 @@ class HomeViewModel(
                     if (item.id == queueId) item.copy(personName = personName, documentType = documentType) else item
                 } }
 
+                val pagePaths = pageFiles.map { it.absolutePath }
+                val nonIdFullPageTypes = setOf("Birth Certificate", "Death Certificate", "Marksheet")
+                var isId = imageUris.size == 2 &&
+                    useA4Format.value &&
+                    documentType !in nonIdFullPageTypes &&
+                    ImageProcessor.canPairFitOnSingleA4IdSheet(pagePaths)
+
+                // Extra smart check when 2 pages were scanned via "Add Page":
+                // If Page 2 is a full-page certificate or a DIFFERENT specific ID card than Page 1
+                // (e.g. Page 1 = Birth Certificate / Aadhaar Card and Page 2 = PAN Card),
+                // they are 2 separate documents, NOT Front+Back of the same card -> use 2-page PDF!
+                if (isId && pageFiles.size == 2) {
+                    try {
+                        val secondPageAnalysis = analyzeDocumentLocally(pageFiles[1])
+                        val secondDocType = sanitizeDocumentType(secondPageAnalysis.documentType)
+                        if (secondDocType in nonIdFullPageTypes) {
+                            isId = false
+                        } else if (documentType != "Document" && secondDocType != "Document" && documentType != secondDocType) {
+                            // E.g. Page 1 is Voter ID / Birth Certificate and Page 2 is PAN Card (or Page 2 is a single-sided PAN Card)
+                            isId = false
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                postStatusMessage("Creating preview image...", StatusBannerTone.INFO)
+                updateQueueStatus(queueId, "Creating preview image...", QueueItemPhase.PROCESSING)
+                val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
+                val resultFile = if (isId) {
+                    ImageProcessor.combineImagesToA4(pagePaths, combinedFile)
+                } else {
+                    ImageProcessor.combineImages(pagePaths, combinedFile)
+                }
+
+                if (resultFile == null) {
+                    postStatusMessage("Failed to combine images", StatusBannerTone.ERROR)
+                    updateQueueStatus(queueId, "Failed: Combined empty", QueueItemPhase.FAILED)
+                    _isProcessing.value = false
+                    return
+                }
+
+                val targetKb = targetSizeKb.value
+                postStatusMessage("Compressing preview...", StatusBannerTone.INFO)
+                updateQueueStatus(queueId, "Compressing preview...", QueueItemPhase.PROCESSING)
+                val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
+
+                try { resultFile.delete() } catch (e: Exception) {}
+
                 if (isId) {
                     pageFiles.forEach { file ->
                         try { file.delete() } catch (e: Exception) {}
@@ -1323,8 +1386,8 @@ class HomeViewModel(
                 }
 
                 if (showConfirmation.value) {
-                    _statusMessage.value = "Multi-scan complete. Please confirm."
-                    updateQueueStatus(queueId, "Awaiting Confirmation")
+                    postStatusMessage("Multi-scan complete. Please confirm.", StatusBannerTone.SUCCESS)
+                    updateQueueStatus(queueId, "Awaiting Confirmation", QueueItemPhase.AWAITING_CONFIRMATION)
                     val item = PendingDocument(
                         queueId = queueId,
                         compressedFile = compressedPreviewFile,
@@ -1334,8 +1397,8 @@ class HomeViewModel(
                     )
                     _pendingDocuments.update { it + item }
                 } else {
-                    _statusMessage.value = ""
-                    updateQueueStatus(queueId, "Saving automatically...")
+                    clearStatusMessage()
+                    updateQueueStatus(queueId, "Saving automatically...", QueueItemPhase.PROCESSING)
                     _isProcessing.value = false
 
                     viewModelScope.launch {
@@ -1353,8 +1416,8 @@ class HomeViewModel(
             } catch (e: Exception) {
                 e.printStackTrace()
                 _isProcessing.value = false
-                _statusMessage.value = "Failed: ${e.message}"
-                updateQueueStatus(queueId, "Failed: ${e.message}")
+                postStatusMessage("Failed: ${e.message}", StatusBannerTone.ERROR)
+                updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             }
         }
 
@@ -1375,58 +1438,23 @@ class HomeViewModel(
                 personName = personName,
                 documentType = documentType,
                 format = format,
-                status = "Updating document..."
+                status = "Updating document...",
+                phase = QueueItemPhase.PROCESSING,
+                docId = docId
             )
             _activeQueue.update { it + initialItem }
 
             try {
                 val existingDoc = database.documentDao().getAllDocuments().first().find { it.id == docId }
                 if (existingDoc == null) {
-                    _statusMessage.value = "Error: Document not found in database."
-                    updateQueueStatus(queueId, "Failed: Not found")
+                    postStatusMessage("Error: Document not found in database.", StatusBannerTone.ERROR)
+                    updateQueueStatus(queueId, "Failed: Not found", QueueItemPhase.FAILED)
                     _isProcessing.value = false
                     return@launch
                 }
 
                 val checkedPersonName = personName.trim().ifEmpty { "Client_${System.currentTimeMillis() % 100000}" }
                 val checkedDocumentType = documentType.trim().ifEmpty { "Document" }
-
-                var finalLocalFile = File(existingDoc.localFilePath)
-                var tempPageFiles: List<File>? = null
-                var isId = false
-
-                if (newPageUris != null && newPageUris.isNotEmpty()) {
-                    _statusMessage.value = "Processing new page scans..."
-                    updateQueueStatus(queueId, "Processing new scans...")
-                    
-                    tempPageFiles = newPageUris.mapIndexed { index, uri ->
-                        val file = File(context.cacheDir, "edit_page_${java.util.UUID.randomUUID()}_$index.jpeg")
-                        ImageProcessor.fixImageOrientation(context, uri, file)
-                    }
-
-                    val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
-                    // A4 Sheet Canvas: strictly for exactly 2 pages when the user enabled the A4 format toggle.
-                    // OFF → clean vertical stacking (combineImages); ON → A4 xerox layout (combineImagesToA4).
-                    isId = newPageUris.size == 2 && useA4Format.value
-                    val resultFile = if (isId) {
-                        ImageProcessor.combineImagesToA4(tempPageFiles.map { it.absolutePath }, combinedFile)
-                    } else {
-                        ImageProcessor.combineImages(tempPageFiles.map { it.absolutePath }, combinedFile)
-                    }
-                    if (resultFile == null) {
-                        _statusMessage.value = "Failed to combine images."
-                        updateQueueStatus(queueId, "Failed: Combined empty")
-                        _isProcessing.value = false
-                        return@launch
-                    }
-
-                    val targetKb = targetSizeKb.value
-                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
-                    try { resultFile.delete() } catch (e: Exception) {}
-
-                    compressedFile.copyTo(finalLocalFile, overwrite = true)
-                    try { compressedFile.delete() } catch (e: Exception) {}
-                }
 
                 val oldFileName = existingDoc.fileName
                 val oldBase = oldFileName.substringBeforeLast(".")
@@ -1445,24 +1473,77 @@ class HomeViewModel(
                 val finalPdfName = "$newBaseName.pdf"
                 val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
 
+                val targetLocalJpg = File(context.filesDir, finalJpgName)
+                val targetLocalPdf = File(context.filesDir, finalPdfName)
+                var sourceFileForUpload = File(existingDoc.localFilePath)
+                var tempPageFiles: List<File>? = null
+                var isId = false
+
+                if (newPageUris != null && newPageUris.isNotEmpty()) {
+                    postStatusMessage("Processing new page scans...", StatusBannerTone.INFO)
+                    updateQueueStatus(queueId, "Processing new scans...", QueueItemPhase.PROCESSING)
+                    
+                    tempPageFiles = newPageUris.mapIndexed { index, uri ->
+                        val file = File(context.cacheDir, "edit_page_${java.util.UUID.randomUUID()}_$index.jpeg")
+                        ImageProcessor.fixImageOrientation(context, uri, file)
+                    }
+
+                    val combinedFile = File(context.cacheDir, "edit_combined_${java.util.UUID.randomUUID()}.jpeg")
+                    // A4 Sheet Canvas: strictly for 2 compact ID card pages (Front + Back) when the A4 toggle is enabled
+                    // AND both images fit on a single A4 sheet without portrait overflow or clipping.
+                    val editPagePaths = tempPageFiles.map { it.absolutePath }
+                    isId = newPageUris.size == 2 && useA4Format.value && ImageProcessor.canPairFitOnSingleA4IdSheet(editPagePaths)
+                    val resultFile = if (isId) {
+                        ImageProcessor.combineImagesToA4(editPagePaths, combinedFile)
+                    } else {
+                        ImageProcessor.combineImages(editPagePaths, combinedFile)
+                    }
+                    if (resultFile == null) {
+                        tempPageFiles.forEach { try { it.delete() } catch (_: Exception) {} }
+                        postStatusMessage("Failed to combine images.", StatusBannerTone.ERROR)
+                        updateQueueStatus(queueId, "Failed: Combined empty", QueueItemPhase.FAILED)
+                        _isProcessing.value = false
+                        return@launch
+                    }
+
+                    val targetKb = targetSizeKb.value
+                    val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
+                    try { resultFile.delete() } catch (e: Exception) {}
+
+                    // Always write the newly combined image to a .jpeg file and clear any old PDF so executeBackgroundUpload generates a fresh PDF
+                    compressedFile.copyTo(targetLocalJpg, overwrite = true)
+                    try { compressedFile.delete() } catch (e: Exception) {}
+                    if (targetLocalPdf.exists()) {
+                        try { targetLocalPdf.delete() } catch (e: Exception) {}
+                    }
+                    sourceFileForUpload = targetLocalJpg
+                }
+
+                val updatedLocalPath = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
+                    targetLocalPdf.absolutePath
+                } else {
+                    targetLocalJpg.absolutePath
+                }
+
                 val updatedEntity = existingDoc.copy(
                     fileName = dbFileName,
                     personName = checkedPersonName,
                     documentType = checkedDocumentType,
+                    localFilePath = if (File(updatedLocalPath).exists()) updatedLocalPath else sourceFileForUpload.absolutePath,
                     isUploaded = false,
                     timestamp = System.currentTimeMillis()
                 )
                 database.documentDao().updateDocument(updatedEntity)
 
-                _statusMessage.value = ""
-                updateQueueStatus(queueId, "Syncing changes...")
+                clearStatusMessage()
+                updateQueueStatus(queueId, "Syncing changes...", QueueItemPhase.PROCESSING)
 
                 _isProcessing.value = false
                 viewModelScope.launch {
                     executeBackgroundUpload(
                         context = context,
                         queueId = queueId,
-                        compressedFile = finalLocalFile,
+                        compressedFile = sourceFileForUpload,
                         checkedPersonName = checkedPersonName,
                         checkedDocumentType = checkedDocumentType,
                         format = format,
@@ -1475,8 +1556,8 @@ class HomeViewModel(
             } catch (e: Exception) {
                 e.printStackTrace()
                 _isProcessing.value = false
-                _statusMessage.value = "Update failed: ${e.message}"
-                updateQueueStatus(queueId, "Failed: ${e.message}")
+                postStatusMessage("Update failed: ${e.message}", StatusBannerTone.ERROR)
+                updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             }
         }
     }
@@ -1515,13 +1596,14 @@ class HomeViewModel(
                 personName = checkedPersonName,
                 documentType = checkedDocumentType,
                 format = format,
-                status = "Authorizing Google..."
+                status = "Authorizing Google...",
+                phase = QueueItemPhase.PROCESSING
             ) else item
         } }
 
         viewModelScope.launch {
             _isProcessing.value = true
-            _statusMessage.value = "Requesting Google authorization..."
+            postStatusMessage("Requesting Google authorization...", StatusBannerTone.INFO)
             
             val email = settingsRepository.googleEmail.first()
             val folderId = settingsRepository.driveFolderId.first()
@@ -1576,8 +1658,8 @@ class HomeViewModel(
             val localPdf = File(context.filesDir, finalPdfName)
             if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
                 try {
-                    _statusMessage.value = "Generating and structuring PDF..."
-                    updateQueueStatus(queueId, "Generating structured PDF...")
+                    postStatusMessage("Generating and structuring PDF...", StatusBannerTone.INFO)
+                    updateQueueStatus(queueId, "Generating structured PDF...", QueueItemPhase.PROCESSING)
                     if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
                         ImageProcessor.convertToMultiPagePdf(pending.pageFiles, localPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
                     } else {
@@ -1615,11 +1697,11 @@ class HomeViewModel(
                 -1L
             }
 
-            updateQueueStatus(queueId, "Syncing directly...")
+            updateQueueStatus(queueId, "Syncing directly...", QueueItemPhase.PROCESSING)
 
             if (email.isNullOrEmpty()) {
-                _statusMessage.value = "Error: Please sign in to sync with Drive! Saved locally."
-                updateQueueStatus(queueId, "Saved locally (Sign-In required)")
+                postStatusMessage("Error: Please sign in to sync with Drive! Saved locally.", StatusBannerTone.WARNING)
+                updateQueueStatus(queueId, "Saved locally (Sign-In required)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                 _isProcessing.value = false
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
                 pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
@@ -1631,8 +1713,8 @@ class HomeViewModel(
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken == null) {
-                    _statusMessage.value = "Failed to retrieve Google token. Saved locally."
-                    updateQueueStatus(queueId, "Saved locally (Token failed)")
+                    postStatusMessage("Failed to retrieve Google token. Saved locally.", StatusBannerTone.WARNING)
+                    updateQueueStatus(queueId, "Saved locally (Token failed)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                     _isProcessing.value = false
                     try { pending.compressedFile.delete() } catch (el: Exception) {}
                     pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
@@ -1643,8 +1725,8 @@ class HomeViewModel(
                 var uploadParentId = folderId
                 val subFolderName = targetSubfolder.value.trim()
                 if (subFolderName.isNotEmpty()) {
-                    _statusMessage.value = "Creating/finding target folder: $subFolderName..."
-                    updateQueueStatus(queueId, "Finding target folder: $subFolderName...")
+                    postStatusMessage("Creating/finding target folder: $subFolderName...", StatusBannerTone.INFO)
+                    updateQueueStatus(queueId, "Finding target folder: $subFolderName...", QueueItemPhase.PROCESSING)
                     uploadParentId = getCachedOrFetchSubFolder(obtainedToken, subFolderName, folderId)
                 }
 
@@ -1652,13 +1734,13 @@ class HomeViewModel(
                 var isPdfUploaded = false
 
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                    _statusMessage.value = "Uploading compressed image to Google Drive..."
-                    updateQueueStatus(queueId, "Uploading image standard file...")
+                    postStatusMessage("Uploading compressed image to Google Drive...", StatusBannerTone.INFO)
+                    updateQueueStatus(queueId, "Uploading image standard file...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
                         email = email,
                         initialToken = obtainedToken,
-                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                        onStatusUpdate = { updateQueueStatus(queueId, it, QueueItemPhase.PROCESSING) }
                     ) { token ->
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
@@ -1676,13 +1758,13 @@ class HomeViewModel(
                     if (!localPdf.exists()) {
                         throw java.io.FileNotFoundException("PDF file not found: ${localPdf.absolutePath}")
                     }
-                    _statusMessage.value = "Uploading structured PDF to Google Drive..."
-                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                    postStatusMessage("Uploading structured PDF to Google Drive...", StatusBannerTone.INFO)
+                    updateQueueStatus(queueId, "Uploading PDF to Drive...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
                         email = email,
                         initialToken = obtainedToken,
-                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                        onStatusUpdate = { updateQueueStatus(queueId, it, QueueItemPhase.PROCESSING) }
                     ) { token ->
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
@@ -1730,26 +1812,33 @@ class HomeViewModel(
                 } else {
                     "Saved locally (Drive Upload Failed)"
                 }
-                _statusMessage.value = msg
-                updateQueueStatus(queueId, if (overallSuccess) "Completed" else "Saved locally (Drive fail)")
+                postStatusMessage(
+                    msg,
+                    if (overallSuccess) StatusBannerTone.SUCCESS else StatusBannerTone.WARNING
+                )
+                updateQueueStatus(
+                    queueId,
+                    if (overallSuccess) "Completed" else "Saved locally (Drive fail)",
+                    if (overallSuccess) QueueItemPhase.COMPLETED else QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC
+                )
                 
                 viewModelScope.launch {
                     kotlinx.coroutines.delay(3000)
                     if (_statusMessage.value == msg) {
-                        _statusMessage.value = ""
+                        clearStatusMessage()
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
                 val errMsg = "Error uploading to Drive: ${e.message}. Saved locally."
-                _statusMessage.value = errMsg
-                updateQueueStatus(queueId, "Saved locally (Drive fail)")
+                postStatusMessage(errMsg, StatusBannerTone.WARNING)
+                updateQueueStatus(queueId, "Saved locally (Drive fail)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                 obtainedToken?.let { invalidateCachedToken(context, it) }
                 
                 viewModelScope.launch {
                     kotlinx.coroutines.delay(4000)
                     if (_statusMessage.value == errMsg) {
-                        _statusMessage.value = ""
+                        clearStatusMessage()
                     }
                 }
             } finally {
@@ -1906,14 +1995,14 @@ class HomeViewModel(
                 updateQueueDocId(queueId, insertId.toInt())
             }
 
-            updateQueueStatus(queueId, "Authorizing Google Drive...")
+            updateQueueStatus(queueId, "Authorizing Google Drive...", QueueItemPhase.PROCESSING)
             
             val email = settingsRepository.googleEmail.first()
             val folderId = settingsRepository.driveFolderId.first()
             val subFolderName = targetSubfolder.value.trim()
             
             if (email.isNullOrEmpty()) {
-                updateQueueStatus(queueId, "Saved locally (Sign-In required)")
+                updateQueueStatus(queueId, "Saved locally (Sign-In required)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                 fetchDriveFiles(context)
                 return
             }
@@ -1923,14 +2012,14 @@ class HomeViewModel(
             backgroundUploadMutex.withLock {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken == null) {
-                    updateQueueStatus(queueId, "Saved locally (Token failed)")
+                    updateQueueStatus(queueId, "Saved locally (Token failed)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                     fetchDriveFiles(context)
                     return@withLock
                 }
 
                 var uploadParentId = folderId
                 if (subFolderName.isNotEmpty()) {
-                    updateQueueStatus(queueId, "Locating folder: $subFolderName...")
+                    updateQueueStatus(queueId, "Locating folder: $subFolderName...", QueueItemPhase.PROCESSING)
                     uploadParentId = getCachedOrFetchSubFolder(obtainedToken!!, subFolderName, folderId)
                 }
 
@@ -1941,12 +2030,12 @@ class HomeViewModel(
                     if (!safeLocalJpg.exists()) {
                         throw java.io.FileNotFoundException("JPEG file not found: ${safeLocalJpg.absolutePath}")
                     }
-                    updateQueueStatus(queueId, "Uploading image standard file...")
+                    updateQueueStatus(queueId, "Uploading image standard file...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
                         email = email,
                         initialToken = obtainedToken,
-                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                        onStatusUpdate = { updateQueueStatus(queueId, it, QueueItemPhase.PROCESSING) }
                     ) { token ->
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
@@ -1965,12 +2054,12 @@ class HomeViewModel(
                     if (!safeLocalPdf.exists()) {
                         throw java.io.FileNotFoundException("PDF file not found: ${safeLocalPdf.absolutePath}")
                     }
-                    updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                    updateQueueStatus(queueId, "Uploading PDF to Drive...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
                         email = email,
                         initialToken = obtainedToken,
-                        onStatusUpdate = { updateQueueStatus(queueId, it) }
+                        onStatusUpdate = { updateQueueStatus(queueId, it, QueueItemPhase.PROCESSING) }
                     ) { token ->
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
@@ -2013,10 +2102,10 @@ class HomeViewModel(
                         }
                     }
                     fetchDriveFiles(context)
-                    updateQueueStatus(queueId, "Completed")
+                    updateQueueStatus(queueId, "Completed", QueueItemPhase.COMPLETED)
                     uploadSuccess = true
                 } else {
-                    updateQueueStatus(queueId, "Saved locally (Drive fail)")
+                    updateQueueStatus(queueId, "Saved locally (Drive fail)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
                 }
             }
 
@@ -2027,7 +2116,7 @@ class HomeViewModel(
         } catch (e: Exception) {
             e.printStackTrace()
             val msg = e.message ?: "Unknown error"
-            updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})")
+            updateQueueStatus(queueId, "Saved locally (Drive fail: ${msg.take(30)})", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
             showUploadFailedNotification(context, checkedPersonName, checkedDocumentType)
         } finally {
             if (existingDocId == null) {
@@ -2158,21 +2247,40 @@ class HomeViewModel(
 
                     if (!file.exists()) {
                         android.util.Log.e("HomeViewModel", "Retry failed: file not found on disk for doc ${doc.id}: ${doc.localFilePath}")
+                        postStatusMessage("Local file missing for ${doc.personName}. Cannot retry.", StatusBannerTone.ERROR)
                         return@launch
                     }
 
-                    val queueId = java.util.UUID.randomUUID().toString()
                     val isPdf = doc.fileName.endsWith(".pdf", ignoreCase = true)
                     val uploadFormat = if (isPdf) UploadFormat.PDF else UploadFormat.JPEG
+                    val existingQueueItem = _activeQueue.value.find { it.docId == doc.id }
+                    val queueId = existingQueueItem?.id ?: java.util.UUID.randomUUID().toString()
 
-                    _activeQueue.update { it + QueueItem(
-                        id = queueId,
-                        personName = doc.personName,
-                        documentType = doc.documentType,
-                        status = "Retrying upload...",
-                        format = uploadFormat,
-                        docId = doc.id
-                    ) }
+                    if (existingQueueItem != null) {
+                        _activeQueue.update { list ->
+                            list.map { item ->
+                                if (item.id == queueId) {
+                                    item.copy(
+                                        personName = doc.personName,
+                                        documentType = doc.documentType,
+                                        status = "Retrying upload...",
+                                        phase = QueueItemPhase.PROCESSING,
+                                        format = uploadFormat
+                                    )
+                                } else item
+                            }
+                        }
+                    } else {
+                        _activeQueue.update { it + QueueItem(
+                            id = queueId,
+                            personName = doc.personName,
+                            documentType = doc.documentType,
+                            status = "Retrying upload...",
+                            phase = QueueItemPhase.PROCESSING,
+                            format = uploadFormat,
+                            docId = doc.id
+                        ) }
+                    }
 
                     executeBackgroundUpload(
                         context = context,
@@ -2197,14 +2305,16 @@ class HomeViewModel(
                 
                 if (selectedDocs.isEmpty()) return@launch
                 
-                _statusMessage.value = "Merging documents to PDF..."
+                val cleanDisplayTitle = fileName.trim().removeSuffix(".pdf").removeSuffix(".PDF").trim().ifEmpty { "Merged_Document" }
+                postStatusMessage("Merging ${selectedDocs.size} documents into PDF...", StatusBannerTone.INFO)
                 _isProcessing.value = true
                 
                 _activeQueue.update { it + QueueItem(
                     id = queueId,
-                    personName = "Merged",
-                    documentType = "PDF",
+                    personName = cleanDisplayTitle,
+                    documentType = "Merged PDF (${selectedDocs.size} docs)",
                     status = "Starting...",
+                    phase = QueueItemPhase.PROCESSING,
                     format = UploadFormat.PDF
                 )}
                 
@@ -2223,9 +2333,9 @@ class HomeViewModel(
                 }
                 
                 if (filesToMerge.isEmpty()) {
-                    _statusMessage.value = "No valid documents selected to merge."
+                    postStatusMessage("No valid documents selected to merge.", StatusBannerTone.ERROR)
                     _isProcessing.value = false
-                    updateQueueStatus(queueId, "Failed: No documents")
+                    updateQueueStatus(queueId, "Failed: No documents", QueueItemPhase.FAILED)
                     try { tempDir.deleteRecursively() } catch (e: Exception) {}
                     return@launch
                 }
@@ -2233,13 +2343,13 @@ class HomeViewModel(
                 val finalFileName = if (fileName.endsWith(".pdf", ignoreCase = true)) fileName else "$fileName.pdf"
                 val pdfFile = File(context.cacheDir, "merged_${java.util.UUID.randomUUID()}.pdf")
                 
-                updateQueueStatus(queueId, "Generating PDF...")
+                updateQueueStatus(queueId, "Generating PDF...", QueueItemPhase.PROCESSING)
                 try {
                     val result = ImageProcessor.convertToMultiPagePdf(filesToMerge, pdfFile, targetSizeKb, autoEnhance = autoEnhanceEnabled.value)
                     try { tempDir.deleteRecursively() } catch (e: Exception) {}
                     if (result == null || !pdfFile.exists() || pdfFile.length() == 0L) {
-                        _statusMessage.value = "Failed to create merged PDF (Try increasing target size)."
-                        updateQueueStatus(queueId, "Failed: Generation error")
+                        postStatusMessage("Failed to create merged PDF (Try increasing target size).", StatusBannerTone.ERROR)
+                        updateQueueStatus(queueId, "Failed: Generation error", QueueItemPhase.FAILED)
                         return@launch
                     }
                     
@@ -2253,14 +2363,14 @@ class HomeViewModel(
                     var isUploaded = false
                     val email = googleEmail.value
                     if (!email.isNullOrEmpty()) {
-                        updateQueueStatus(queueId, "Uploading PDF to Drive...")
+                        updateQueueStatus(queueId, "Uploading PDF to Drive...", QueueItemPhase.PROCESSING)
                         val uploadParentId = folderId ?: driveFolderId.value
                         
                         val (uploaded, _) = uploadFileWithAuthRetry(
                             context = context,
                             email = email,
                             initialToken = null,
-                            onStatusUpdate = { updateQueueStatus(queueId, it) }
+                            onStatusUpdate = { updateQueueStatus(queueId, it, QueueItemPhase.PROCESSING) }
                         ) { token ->
                             GoogleDriveClient.uploadFile(
                                 accessToken = token,
@@ -2273,13 +2383,14 @@ class HomeViewModel(
                         isUploaded = uploaded
                     }
                     
-                    val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
-                    val builtDrivePath = if (isUploaded) "My Drive/$driveFolderNameStr" else null
+                    val defaultDriveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
+                    val effectiveFolderName = folderName.trim().ifEmpty { defaultDriveFolderNameStr }
+                    val builtDrivePath = if (isUploaded) "My Drive/$effectiveFolderName" else null
 
                     val mergedEntity = DocumentEntity(
                         fileName = finalFileName,
-                        personName = "Merged",
-                        documentType = "PDF",
+                        personName = cleanDisplayTitle,
+                        documentType = "Merged PDF",
                         localFilePath = safeLocalCopy.absolutePath,
                         isUploaded = isUploaded,
                         drivePath = builtDrivePath,
@@ -2291,9 +2402,17 @@ class HomeViewModel(
                         updateQueueDocId(queueId, id.toInt())
                     }
                     
-                    updateQueueStatus(queueId, "Completed - Merged successfully!")
-                    _statusMessage.value = "Merged successfully!"
+                    val mergeSuccessPhase = if (isUploaded || email.isNullOrEmpty()) QueueItemPhase.COMPLETED else QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC
+                    val mergeStatusLabel = if (isUploaded || email.isNullOrEmpty()) "Completed - Merged successfully!" else "Saved locally (Drive fail)"
+                    updateQueueStatus(queueId, mergeStatusLabel, mergeSuccessPhase)
+                    postStatusMessage(
+                        if (isUploaded || email.isNullOrEmpty()) "Merged successfully!" else "Merged locally (Drive upload failed)",
+                        if (isUploaded || email.isNullOrEmpty()) StatusBannerTone.SUCCESS else StatusBannerTone.WARNING
+                    )
                     updatePublicFolderSize()
+                    if (isUploaded) {
+                        fetchDriveFiles(context)
+                    }
                 } finally {
                     // BUG FIX: always clean up temp pdfFile from cacheDir to avoid cache bloat
                     try { pdfFile.delete() } catch (ed: Exception) {}
@@ -2301,8 +2420,8 @@ class HomeViewModel(
                 
             } catch (e: Exception) {
                 e.printStackTrace()
-                _statusMessage.value = "Merge failed: ${e.message}"
-                updateQueueStatus(queueId, "Failed: ${e.message}")
+                postStatusMessage("Merge failed: ${e.message}", StatusBannerTone.ERROR)
+                updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             } finally {
                 _isProcessing.value = false
             }
@@ -2338,7 +2457,8 @@ class HomeViewModel(
                 personName = checkedPersonName,
                 documentType = checkedDocumentType,
                 format = format,
-                status = "Queued..."
+                status = "Queued...",
+                phase = QueueItemPhase.PROCESSING
             ) else item
         } }
 
@@ -2356,12 +2476,25 @@ class HomeViewModel(
         }
     }
 
-    private fun updateQueueStatus(id: String, status: String) {
+    private fun updateQueueStatus(
+        id: String,
+        status: String,
+        phase: QueueItemPhase = inferQueuePhaseFromStatus(status)
+    ) {
         _activeQueue.update { currentList ->
             currentList.map { item ->
-                if (item.id == id) item.copy(status = status) else item
+                if (item.id == id) item.copy(status = status, phase = phase) else item
             }
         }
+    }
+
+    private fun inferQueuePhaseFromStatus(status: String): QueueItemPhase = when {
+        status.equals("Cancelled", ignoreCase = true) -> QueueItemPhase.CANCELLED
+        status.equals("Awaiting Confirmation", ignoreCase = true) -> QueueItemPhase.AWAITING_CONFIRMATION
+        status.startsWith("Completed", ignoreCase = true) -> QueueItemPhase.COMPLETED
+        status.startsWith("Saved locally", ignoreCase = true) -> QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC
+        status.startsWith("Failed", ignoreCase = true) -> QueueItemPhase.FAILED
+        else -> QueueItemPhase.PROCESSING
     }
 
     private fun updateQueueDocId(id: String, docId: Int) {
@@ -2703,6 +2836,15 @@ class HomeViewModel(
         var passportScore = 0
         var marksheetScore = 0
         var rationScore = 0
+        var birthCertScore = 0
+        var deathCertScore = 0
+
+        if (lowercaseText.contains("birth certificate") || lowercaseText.contains("certificate of birth")) birthCertScore += 22
+        if (lowercaseText.contains("registration of births") || lowercaseText.contains("births & deaths") || lowercaseText.contains("births and deaths")) birthCertScore += 14
+        if (lowercaseText.contains("sub-registrar (birth") || lowercaseText.contains("registrar of birth") || lowercaseText.contains("form-5") || lowercaseText.contains("form no. 5")) birthCertScore += 10
+
+        if (lowercaseText.contains("death certificate") || lowercaseText.contains("certificate of death")) deathCertScore += 22
+        if (lowercaseText.contains("date of death") || lowercaseText.contains("place of death") || lowercaseText.contains("form-6") || lowercaseText.contains("form no. 6")) deathCertScore += 12
 
         if (Regex("\\b\\d{4}[\\s-]\\d{4}[\\s-]\\d{4}\\b").containsMatchIn(fullText)) aadhaarScore += 12
         if (lowercaseText.contains("aadhaar") || lowercaseText.contains("aadhar") || lowercaseText.contains("adhar")) aadhaarScore += 10
@@ -2734,6 +2876,8 @@ class HomeViewModel(
         if (lowercaseText.contains("department of food") || lowercaseText.contains("food and civil supplies")) rationScore += 8
 
         val scores = mapOf(
+            "Birth Certificate" to birthCertScore,
+            "Death Certificate" to deathCertScore,
             "Aadhaar Card" to aadhaarScore,
             "PAN Card" to panScore,
             "Voter ID" to voterScore,
@@ -2748,12 +2892,15 @@ class HomeViewModel(
             documentType = bestMatch.key
         }
 
-        // Helper: strips leading labels, honorifics, and punctuation from a candidate name line
+        // Helper: strips leading labels, trailing 2-column form fields, honorifics, and punctuation from a candidate name line
         fun cleanCandidateName(raw: String): String {
             var s = raw.trim(':', '-', ' ', '=', '|', '।', '.', ',', '/', ';', '_')
             // Strip any inline label prefix
-            val labelRegex = Regex("^(?:elector'?s?\\s*name|card\\s*holder'?s?\\s*name|holder'?s?\\s*name|name\\s*of\\s*holder|name\\s*of\\s*candidate|student'?s?\\s*name|full\\s*name|given\\s*name(?:\\(s\\))?|surname|name)\\s*[:\\-=|।.]*\\s*", RegexOption.IGNORE_CASE)
+            val labelRegex = Regex("^(?:elector'?s?\\s*name|card\\s*holder'?s?\\s*name|holder'?s?\\s*name|name\\s*of\\s*holder|name\\s*of\\s*candidate|name\\s*of\\s*child|child'?s?\\s*name|student'?s?\\s*name|full\\s*name|given\\s*name(?:\\(s\\))?|surname|name)\\s*[:\\-=|।.]*\\s*", RegexOption.IGNORE_CASE)
             s = s.replace(labelRegex, "").trim(':', '-', ' ', '=', '|', '।', '.', ',', '/', ';', '_')
+            // Strip any trailing second-column field on the same line (e.g., "RAMJOY ROY   GENDER : MALE" on 2-column certificates)
+            val trailingColumnRegex = Regex("\\b(?:gender|sex|male|female|transgender|date\\s*of\\s*birth|dob|yob|place\\s*of\\s*birth|age|blood\\s*group|nationality|religion|caste|certificate\\s*no|registration\\s*no|epic|aadhaar|aadhar)\\b.*$", RegexOption.IGNORE_CASE)
+            s = s.replace(trailingColumnRegex, "").trim(':', '-', ' ', '=', '|', '।', '.', ',', '/', ';', '_')
             // Strip common Indian honorific titles at the start so the pure person name remains
             val titleRegex = Regex("^(?:shri|smt|sri|kumari|km|mr|mrs|ms|dr|late)\\.?\\s+", RegexOption.IGNORE_CASE)
             s = s.replace(titleRegex, "").trim()
@@ -3077,6 +3224,16 @@ class HomeViewModel(
         val typeLower = detectedType.trim().lowercase()
         val textLower = keywordText.lowercase()
 
+        // Check Birth / Death Certificate first because certificates often list parents' EPIC / Aadhaar numbers as identity proof
+        if (typeLower.contains("birth certificate") || typeLower.contains("certificate of birth") ||
+            textLower.contains("birth certificate") || textLower.contains("certificate of birth") ||
+            (textLower.contains("registration of births") && !textLower.contains("death certificate"))) {
+            return "Birth Certificate"
+        }
+        if (typeLower.contains("death certificate") || typeLower.contains("certificate of death") ||
+            textLower.contains("death certificate") || textLower.contains("certificate of death")) {
+            return "Death Certificate"
+        }
         if (typeLower.contains("aadhaar") || typeLower.contains("aadhar") || textLower.contains("aadhaar") || textLower.contains("aadhar") || textLower.contains("unique identification") || textLower.contains("uidai")) {
             return "Aadhaar Card"
         }
@@ -3177,8 +3334,10 @@ class HomeViewModel(
     fun clearAllData(deletePublicFiles: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Wipe Room database
+                // Wipe Room database and clear in-memory queues
                 database.documentDao().deleteAllDocuments()
+                _activeQueue.value = emptyList()
+                _pendingDocuments.value = emptyList()
 
                 // Delete cached files
                 context.cacheDir.listFiles()?.forEach { file ->
@@ -3189,9 +3348,11 @@ class HomeViewModel(
                     file.deleteRecursively()
                 }
 
-                // Delete internally saved files
+                // Delete internally saved document files while strictly preserving the DataStore preferences directory
                 context.filesDir.listFiles()?.forEach { file ->
-                    file.deleteRecursively()
+                    if (!file.name.equals("datastore", ignoreCase = true)) {
+                        file.deleteRecursively()
+                    }
                 }
 
                 if (deletePublicFiles) {
@@ -3199,6 +3360,7 @@ class HomeViewModel(
                     com.example.data.ImageProcessor.clearPublicDocuments(context)
                 }
                 updatePublicFolderSize()
+                postStatusMessage("Local storage & cache cleaned successfully.", StatusBannerTone.SUCCESS)
             } catch (e: Exception) {
                 e.printStackTrace()
             }

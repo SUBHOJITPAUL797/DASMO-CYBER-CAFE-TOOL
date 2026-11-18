@@ -183,6 +183,12 @@ object UpdateChecker {
                 }
 
                 val body = response.body ?: return@withContext Result.failure(Exception("Empty response body"))
+                val contentType = response.header("Content-Type", "") ?: ""
+                if (contentType.contains("text/html", ignoreCase = true)) {
+                    return@withContext Result.failure(
+                        Exception("No direct APK file attached to this release. Please use 'View Release on GitHub'.")
+                    )
+                }
                 val contentLength = body.contentLength()
                 val totalMb = if (contentLength > 0) contentLength / (1024.0 * 1024.0) else 0.0
 
@@ -209,6 +215,20 @@ object UpdateChecker {
                         }
                         outputStream.flush()
                     }
+                }
+
+                // Verify the downloaded file is a valid ZIP/APK archive (magic bytes PK\x03\x04)
+                val isValidApk = apkFile.exists() && apkFile.length() > 4 && apkFile.inputStream().use { ins ->
+                    val header = ByteArray(4)
+                    val read = ins.read(header)
+                    read == 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte() &&
+                            header[2] == 0x03.toByte() && header[3] == 0x04.toByte()
+                }
+                if (!isValidApk) {
+                    try { apkFile.delete() } catch (_: Exception) {}
+                    return@withContext Result.failure(
+                        Exception("Downloaded file is not a valid APK package. Please open the release in GitHub.")
+                    )
                 }
 
                 return@withContext Result.success(apkFile)

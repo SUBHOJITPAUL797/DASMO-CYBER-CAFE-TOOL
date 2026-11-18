@@ -39,6 +39,38 @@ import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.*
 
+enum class AdminUserFilter {
+    ALL,
+    PENDING,
+    APPROVED,
+    REVOKED,
+    ADMINS
+}
+
+enum class UserAccountCategory {
+    ADMIN,
+    APPROVED,
+    PENDING,
+    EXPIRED,
+    REVOKED
+}
+
+fun AppUser.resolveAccountCategory(nowMillis: Long = System.currentTimeMillis()): UserAccountCategory = when {
+    isAdmin -> UserAccountCategory.ADMIN
+    status.equals("pending", ignoreCase = true) && !isApproved -> UserAccountCategory.PENDING
+    status.equals("expired", ignoreCase = true) || (expiryTimestamp > 0L && nowMillis > expiryTimestamp) -> UserAccountCategory.EXPIRED
+    isApproved -> UserAccountCategory.APPROVED
+    else -> UserAccountCategory.REVOKED
+}
+
+sealed interface AdminModalDialogState {
+    data object None : AdminModalDialogState
+    data object CreatePreApprovedUser : AdminModalDialogState
+    data class ResetDevice(val user: AppUser) : AdminModalDialogState
+    data class DeleteUser(val user: AppUser) : AdminModalDialogState
+    data class SetExpiry(val user: AppUser) : AdminModalDialogState
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdminDashboardScreen(
@@ -57,31 +89,32 @@ fun AdminDashboardScreen(
     onClearLogs: () -> Unit = {}
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    var selectedFilter by remember { mutableStateOf("ALL") } // ALL, PENDING, APPROVED, ADMINS
-    var showCreateDialog by remember { mutableStateOf(false) }
-    var userToResetDevice by remember { mutableStateOf<AppUser?>(null) }
-    var userToDelete by remember { mutableStateOf<AppUser?>(null) }
-    var userToSetExpiry by remember { mutableStateOf<AppUser?>(null) }
+    var selectedFilter by remember { mutableStateOf(AdminUserFilter.ALL) }
+    var activeModal by remember { mutableStateOf<AdminModalDialogState>(AdminModalDialogState.None) }
 
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
 
-    val pendingUsers = allUsers.filter { it.status == "pending" && !it.isApproved && !it.isAdmin }
-    val approvedUsers = allUsers.filter { it.isApproved && !it.isAdmin }
-    val revokedUsers = allUsers.filter { (it.status == "rejected" || it.status == "declined" || (!it.isApproved && it.status != "pending")) && !it.isAdmin }
-    val admins = allUsers.filter { it.isAdmin }
+    val pendingUsers = allUsers.filter { it.resolveAccountCategory() == UserAccountCategory.PENDING }
+    val approvedUsers = allUsers.filter { it.resolveAccountCategory() == UserAccountCategory.APPROVED }
+    val revokedUsers = allUsers.filter {
+        val cat = it.resolveAccountCategory()
+        cat == UserAccountCategory.REVOKED || cat == UserAccountCategory.EXPIRED
+    }
+    val admins = allUsers.filter { it.resolveAccountCategory() == UserAccountCategory.ADMIN }
 
     val filteredUsers = allUsers.filter { user ->
         val matchesQuery = user.email.contains(searchQuery, ignoreCase = true) ||
                 user.deviceModel.contains(searchQuery, ignoreCase = true) ||
                 user.deviceId.contains(searchQuery, ignoreCase = true)
 
+        val category = user.resolveAccountCategory()
         val matchesFilter = when (selectedFilter) {
-            "PENDING" -> user.status == "pending" && !user.isApproved && !user.isAdmin
-            "APPROVED" -> user.isApproved && !user.isAdmin
-            "REVOKED" -> (user.status == "rejected" || user.status == "declined" || (!user.isApproved && user.status != "pending")) && !user.isAdmin
-            "ADMINS" -> user.isAdmin
-            else -> true
+            AdminUserFilter.PENDING -> category == UserAccountCategory.PENDING
+            AdminUserFilter.APPROVED -> category == UserAccountCategory.APPROVED
+            AdminUserFilter.REVOKED -> category == UserAccountCategory.REVOKED || category == UserAccountCategory.EXPIRED
+            AdminUserFilter.ADMINS -> category == UserAccountCategory.ADMIN
+            AdminUserFilter.ALL -> true
         }
         matchesQuery && matchesFilter
     }
@@ -94,8 +127,10 @@ fun AdminDashboardScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 title = {
                     Column {
                         Text(
@@ -111,7 +146,7 @@ fun AdminDashboardScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { showCreateDialog = true }) {
+                    IconButton(onClick = { activeModal = AdminModalDialogState.CreatePreApprovedUser }) {
                         Icon(
                             imageVector = Icons.Default.PersonAdd,
                             contentDescription = "Pre-Approve User",
@@ -167,7 +202,7 @@ fun AdminDashboardScreen(
                 }
             }
 
-            // Stats Cards Grid
+            // Interactive Stats Cards Grid (tapping a stat filters the list directly)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -179,43 +214,53 @@ fun AdminDashboardScreen(
                     title = "Total",
                     count = allUsers.size,
                     color = MaterialTheme.colorScheme.surfaceVariant,
-                    textColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurface,
+                    isSelected = selectedFilter == AdminUserFilter.ALL,
+                    onClick = { selectedFilter = AdminUserFilter.ALL },
                     modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Pending",
                     count = pendingUsers.size,
-                    color = Color(0xFFFFF3E0),
-                    textColor = Color(0xFFE65100),
+                    color = Color(0xFFFF9100).copy(alpha = 0.18f),
+                    textColor = Color(0xFFFFB74D),
+                    isSelected = selectedFilter == AdminUserFilter.PENDING,
+                    onClick = { selectedFilter = AdminUserFilter.PENDING },
                     modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Approved",
                     count = approvedUsers.size,
-                    color = Color(0xFFE8F5E9),
-                    textColor = Color(0xFF2E7D32),
+                    color = Color(0xFF00C853).copy(alpha = 0.16f),
+                    textColor = Color(0xFF00E676),
+                    isSelected = selectedFilter == AdminUserFilter.APPROVED,
+                    onClick = { selectedFilter = AdminUserFilter.APPROVED },
                     modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Revoked",
                     count = revokedUsers.size,
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    textColor = MaterialTheme.colorScheme.onErrorContainer,
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
+                    textColor = MaterialTheme.colorScheme.error,
+                    isSelected = selectedFilter == AdminUserFilter.REVOKED,
+                    onClick = { selectedFilter = AdminUserFilter.REVOKED },
                     modifier = Modifier.width(85.dp)
                 )
                 StatCard(
                     title = "Admins",
                     count = admins.size,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    textColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                    textColor = MaterialTheme.colorScheme.primary,
+                    isSelected = selectedFilter == AdminUserFilter.ADMINS,
+                    onClick = { selectedFilter = AdminUserFilter.ADMINS },
                     modifier = Modifier.width(85.dp)
                 )
                 val totalSystemScans = allUsers.sumOf { it.totalScannedCount }
                 StatCard(
                     title = "Total Scans",
                     count = totalSystemScans.toInt(),
-                    color = Color(0xFFE0F2F1),
-                    textColor = Color(0xFF00695C),
+                    color = Color(0xFF00BFA5).copy(alpha = 0.16f),
+                    textColor = Color(0xFF1DE9B6),
                     modifier = Modifier.width(95.dp)
                 )
             }
@@ -249,28 +294,28 @@ fun AdminDashboardScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(
-                    selected = selectedFilter == "ALL",
-                    onClick = { selectedFilter = "ALL" },
+                    selected = selectedFilter == AdminUserFilter.ALL,
+                    onClick = { selectedFilter = AdminUserFilter.ALL },
                     label = { Text("All (${allUsers.size})") }
                 )
                 FilterChip(
-                    selected = selectedFilter == "PENDING",
-                    onClick = { selectedFilter = "PENDING" },
+                    selected = selectedFilter == AdminUserFilter.PENDING,
+                    onClick = { selectedFilter = AdminUserFilter.PENDING },
                     label = { Text("Pending (${pendingUsers.size})") }
                 )
                 FilterChip(
-                    selected = selectedFilter == "APPROVED",
-                    onClick = { selectedFilter = "APPROVED" },
+                    selected = selectedFilter == AdminUserFilter.APPROVED,
+                    onClick = { selectedFilter = AdminUserFilter.APPROVED },
                     label = { Text("Approved (${approvedUsers.size})") }
                 )
                 FilterChip(
-                    selected = selectedFilter == "REVOKED",
-                    onClick = { selectedFilter = "REVOKED" },
+                    selected = selectedFilter == AdminUserFilter.REVOKED,
+                    onClick = { selectedFilter = AdminUserFilter.REVOKED },
                     label = { Text("Revoked (${revokedUsers.size})") }
                 )
                 FilterChip(
-                    selected = selectedFilter == "ADMINS",
-                    onClick = { selectedFilter = "ADMINS" },
+                    selected = selectedFilter == AdminUserFilter.ADMINS,
+                    onClick = { selectedFilter = AdminUserFilter.ADMINS },
                     label = { Text("Admins (${admins.size})") }
                 )
             }
@@ -315,9 +360,9 @@ fun AdminDashboardScreen(
                                 onApprove = { onApprove(user.email) },
                                 onDecline = { onDecline(user.email) },
                                 onToggleApproval = { onToggleApproval(user.email, user.isApproved) },
-                                onResetDevice = { userToResetDevice = user },
-                                onSetExpiry = { userToSetExpiry = user },
-                                onDelete = { userToDelete = user }
+                                onResetDevice = { activeModal = AdminModalDialogState.ResetDevice(user) },
+                                onSetExpiry = { activeModal = AdminModalDialogState.SetExpiry(user) },
+                                onDelete = { activeModal = AdminModalDialogState.DeleteUser(user) }
                             )
                         }
                     }
@@ -326,180 +371,176 @@ fun AdminDashboardScreen(
         }
     }
 
-    // Pre-Approve User Dialog
-    if (showCreateDialog) {
-        var emailInput by remember { mutableStateOf("") }
-        var selectedRole by remember { mutableStateOf("user") }
-        var selectedDays by remember { mutableStateOf("30") }
+    when (val modal = activeModal) {
+        AdminModalDialogState.None -> Unit
+        AdminModalDialogState.CreatePreApprovedUser -> {
+            var emailInput by remember { mutableStateOf("") }
+            var selectedRole by remember { mutableStateOf("user") }
+            var selectedDays by remember { mutableStateOf("30") }
 
-        AlertDialog(
-            onDismissRequest = { showCreateDialog = false },
-            title = {
-                Text("Pre-Approve New User", fontWeight = FontWeight.Bold)
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        "Enter the user's Google email address. Once created, they will be instantly approved on the first device they log into.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = emailInput,
-                        onValueChange = { emailInput = it },
-                        label = { Text("Google Account Email") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { selectedRole = if (selectedRole == "admin") "user" else "admin" },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Role: ${selectedRole.uppercase()}")
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                selectedDays = when (selectedDays) {
-                                    "7" -> "30"
-                                    "30" -> "90"
-                                    "90" -> "365"
-                                    "365" -> "0"
-                                    else -> "7"
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(if (selectedDays == "0") "Lifetime" else "$selectedDays Days")
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (emailInput.isNotBlank() && emailInput.contains("@")) {
-                            val days = selectedDays.toLongOrNull() ?: 0L
-                            val expiry = if (days > 0) System.currentTimeMillis() + (days * 24 * 60 * 60 * 1000L) else 0L
-                            onCreateUser(emailInput, selectedRole, "approved", expiry)
-                            showCreateDialog = false
-                        } else {
-                            Toast.makeText(context, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                ) {
-                    Text("Pre-Approve")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // Reset Device Binding Dialog
-    if (userToResetDevice != null) {
-        val user = userToResetDevice!!
-        AlertDialog(
-            onDismissRequest = { userToResetDevice = null },
-            icon = { Icon(imageVector = Icons.Default.PhoneAndroid, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-            title = { Text("Reset Device Binding?", fontWeight = FontWeight.Bold) },
-            text = {
-                Text(
-                    "This will disconnect '${user.email}' from their currently registered device (${user.deviceModel.ifEmpty { user.deviceId.take(12) }}). They will be able to bind and log in from a new phone upon approval."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onResetDevice(user.email)
-                        userToResetDevice = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Unbind Device")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { userToResetDevice = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // Set Expiry Plan Dialog
-    if (userToSetExpiry != null) {
-        val user = userToSetExpiry!!
-        AlertDialog(
-            onDismissRequest = { userToSetExpiry = null },
-            icon = { Icon(imageVector = Icons.Default.AccessTime, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-            title = { Text("Set Access Duration", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Select how long '${user.email}' should have access before needing renewal:")
-                    val options = listOf(
-                        "7 Days" to (7L * 24 * 60 * 60 * 1000L),
-                        "30 Days (1 Month)" to (30L * 24 * 60 * 60 * 1000L),
-                        "90 Days (3 Months)" to (90L * 24 * 60 * 60 * 1000L),
-                        "1 Year (365 Days)" to (365L * 24 * 60 * 60 * 1000L),
-                        "Lifetime Access" to 0L
-                    )
-                    options.forEach { (label, duration) ->
-                        OutlinedButton(
-                            onClick = {
-                                val timestamp = if (duration > 0L) System.currentTimeMillis() + duration else 0L
-                                onUpdateExpiry(user.email, timestamp)
-                                userToSetExpiry = null
-                            },
+            AlertDialog(
+                onDismissRequest = { activeModal = AdminModalDialogState.None },
+                title = {
+                    Text("Pre-Approve New User", fontWeight = FontWeight.Bold)
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "Enter the user's Google email address. Once created, they will be instantly approved on the first device they log into.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        OutlinedTextField(
+                            value = emailInput,
+                            onValueChange = { emailInput = it },
+                            label = { Text("Google Account Email") },
+                            singleLine = true,
                             modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(label)
+                            OutlinedButton(
+                                onClick = { selectedRole = if (selectedRole == "admin") "user" else "admin" },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Role: ${selectedRole.uppercase()}")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    selectedDays = when (selectedDays) {
+                                        "7" -> "30"
+                                        "30" -> "90"
+                                        "90" -> "365"
+                                        "365" -> "0"
+                                        else -> "7"
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(if (selectedDays == "0") "Lifetime" else "$selectedDays Days")
+                            }
                         }
                     }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            if (emailInput.isNotBlank() && emailInput.contains("@")) {
+                                val days = selectedDays.toLongOrNull() ?: 0L
+                                val expiry = if (days > 0) System.currentTimeMillis() + (days * 24 * 60 * 60 * 1000L) else 0L
+                                onCreateUser(emailInput, selectedRole, "approved", expiry)
+                                activeModal = AdminModalDialogState.None
+                            } else {
+                                Toast.makeText(context, "Please enter a valid email address", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("Pre-Approve")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { activeModal = AdminModalDialogState.None }) {
+                        Text("Cancel")
+                    }
                 }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { userToSetExpiry = null }) {
-                    Text("Cancel")
+            )
+        }
+        is AdminModalDialogState.ResetDevice -> {
+            val user = modal.user
+            AlertDialog(
+                onDismissRequest = { activeModal = AdminModalDialogState.None },
+                icon = { Icon(imageVector = Icons.Default.PhoneAndroid, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                title = { Text("Reset Device Binding?", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text(
+                        "This will disconnect '${user.email}' from their currently registered device (${user.deviceModel.ifEmpty { user.deviceId.take(12) }}). They will be able to bind and log in from a new phone upon approval."
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onResetDevice(user.email)
+                            activeModal = AdminModalDialogState.None
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Unbind Device")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { activeModal = AdminModalDialogState.None }) {
+                        Text("Cancel")
+                    }
                 }
-            }
-        )
-    }
-
-    // Delete User Dialog
-    if (userToDelete != null) {
-        val user = userToDelete!!
-        AlertDialog(
-            onDismissRequest = { userToDelete = null },
-            icon = { Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-            title = { Text("Delete User Account?", fontWeight = FontWeight.Bold) },
-            text = {
-                Text("Are you sure you want to permanently delete '${user.email}' from the database? This action cannot be undone.")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        onDeleteUser(user.email)
-                        userToDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete Permanently")
+            )
+        }
+        is AdminModalDialogState.SetExpiry -> {
+            val user = modal.user
+            AlertDialog(
+                onDismissRequest = { activeModal = AdminModalDialogState.None },
+                icon = { Icon(imageVector = Icons.Default.AccessTime, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                title = { Text("Set Access Duration", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Select how long '${user.email}' should have access before needing renewal:")
+                        val options = listOf(
+                            "7 Days" to (7L * 24 * 60 * 60 * 1000L),
+                            "30 Days (1 Month)" to (30L * 24 * 60 * 60 * 1000L),
+                            "90 Days (3 Months)" to (90L * 24 * 60 * 60 * 1000L),
+                            "1 Year (365 Days)" to (365L * 24 * 60 * 60 * 1000L),
+                            "Lifetime Access" to 0L
+                        )
+                        options.forEach { (label, duration) ->
+                            OutlinedButton(
+                                onClick = {
+                                    val timestamp = if (duration > 0L) System.currentTimeMillis() + duration else 0L
+                                    onUpdateExpiry(user.email, timestamp)
+                                    activeModal = AdminModalDialogState.None
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(label)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = { activeModal = AdminModalDialogState.None }) {
+                        Text("Cancel")
+                    }
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { userToDelete = null }) {
-                    Text("Cancel")
+            )
+        }
+        is AdminModalDialogState.DeleteUser -> {
+            val user = modal.user
+            AlertDialog(
+                onDismissRequest = { activeModal = AdminModalDialogState.None },
+                icon = { Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                title = { Text("Delete User Account?", fontWeight = FontWeight.Bold) },
+                text = {
+                    Text("Are you sure you want to permanently delete '${user.email}' from the database? This action cannot be undone.")
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onDeleteUser(user.email)
+                            activeModal = AdminModalDialogState.None
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Delete Permanently")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { activeModal = AdminModalDialogState.None }) {
+                        Text("Cancel")
+                    }
                 }
-            }
-        )
+            )
+        }
     }
 }
 
@@ -514,18 +555,19 @@ fun AdminUserCard(
     onDelete: () -> Unit
 ) {
     val sdf = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
-    val isExpired = user.expiryTimestamp > 0L && System.currentTimeMillis() > user.expiryTimestamp
-    val isRevoked = !user.isAdmin && (user.status == "rejected" || user.status == "declined" || (!user.isApproved && user.status != "pending"))
-    val isPending = !user.isAdmin && user.status == "pending" && !user.isApproved
+    val category = user.resolveAccountCategory()
+    val isExpired = category == UserAccountCategory.EXPIRED
+    val isRevoked = category == UserAccountCategory.REVOKED
+    val isPending = category == UserAccountCategory.PENDING
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = when {
-                user.isAdmin -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f)
-                isExpired -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
-                isRevoked -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.12f)
-                isPending -> Color(0xFFFFF3E0).copy(alpha = 0.8f)
+                user.isAdmin -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f)
+                isExpired -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.22f)
+                isRevoked -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.16f)
+                isPending -> Color(0xFFFF9100).copy(alpha = 0.14f)
                 user.isApproved -> MaterialTheme.colorScheme.surface
                 else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
             }
@@ -534,10 +576,10 @@ fun AdminUserCard(
         border = BorderStroke(
             1.dp,
             when {
-                user.isAdmin -> MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
-                isExpired -> MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
-                isRevoked -> MaterialTheme.colorScheme.error.copy(alpha = 0.3f)
-                isPending -> Color(0xFFE65100).copy(alpha = 0.4f)
+                user.isAdmin -> MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                isExpired -> MaterialTheme.colorScheme.error.copy(alpha = 0.45f)
+                isRevoked -> MaterialTheme.colorScheme.error.copy(alpha = 0.35f)
+                isPending -> Color(0xFFFFB74D).copy(alpha = 0.55f)
                 user.isApproved -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
                 else -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.4f)
             }
@@ -864,11 +906,18 @@ fun StatCard(
     count: Int,
     color: Color,
     textColor: Color,
+    isSelected: Boolean = false,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = modifier,
+        modifier = if (onClick != null) {
+            modifier.clip(RoundedCornerShape(12.dp)).clickable { onClick() }
+        } else {
+            modifier
+        },
         colors = CardDefaults.cardColors(containerColor = color),
+        border = if (isSelected) BorderStroke(1.5.dp, textColor) else BorderStroke(1.dp, textColor.copy(alpha = 0.25f)),
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(
@@ -880,8 +929,8 @@ fun StatCard(
             Text(
                 text = title,
                 style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
-                color = textColor.copy(alpha = 0.8f)
+                fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.SemiBold,
+                color = textColor.copy(alpha = 0.9f)
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(

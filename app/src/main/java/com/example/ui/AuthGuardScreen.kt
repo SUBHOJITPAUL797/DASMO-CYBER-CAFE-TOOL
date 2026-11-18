@@ -38,11 +38,14 @@ fun AuthGuardScreen(
     val context = LocalContext.current
     val deviceModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
 
+    var showDiagnostics by remember { mutableStateOf(false) }
+
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .safeDrawingPadding()
+                .padding(horizontal = 24.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.SpaceBetween,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
@@ -310,6 +313,64 @@ fun AuthGuardScreen(
                     }
                     AuthState.APPROVED -> {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+
+            // Bottom Section: Collapsible Firestore & Auth Diagnostics
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                TextButton(
+                    onClick = { showDiagnostics = !showDiagnostics }
+                ) {
+                    Icon(
+                        imageVector = if (showDiagnostics) Icons.Default.ExpandLess else Icons.Default.Terminal,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (showDiagnostics) "Hide Connection Diagnostics" else "Connection Diagnostics (${dbLogs.size})",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+
+                if (showDiagnostics) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 170.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(
+                                    onClick = onRunDiagnostics,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Run Check", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                }
+                                TextButton(
+                                    onClick = onClearLogs,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Clear Logs", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            val logText = if (dbLogs.isEmpty()) "No diagnostic logs yet. Tap 'Run Check' to test Firestore connection." else dbLogs.takeLast(12).joinToString("\n")
+                            Text(
+                                text = logText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

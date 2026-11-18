@@ -59,6 +59,29 @@ import java.io.FileOutputStream
 
 private data class BgColorOption(val name: String, val color: Color)
 
+private enum class PassportSizeStandard(
+    val title: String,
+    val subtitle: String,
+    val widthPx: Int,
+    val heightPx: Int
+) {
+    INDIA_UK_EU_CM("3.5 x 4.5 cm (Standard)", "413 × 531 px • India / UK / EU", 413, 531),
+    US_2X2_INCH("2 x 2 inch (US)", "600 × 600 px • US Visa & Passport", 600, 600),
+    ICAO_35X45_MM("35 x 45 mm", "413 × 531 px • ICAO Standard", 413, 531),
+    ONLINE_SQUARE_600("600 x 600 px", "1:1 Square • Online Portals", 600, 600);
+
+    val aspectRatio: Float
+        get() = widthPx.toFloat() / heightPx.toFloat()
+}
+
+private sealed interface PassportStudioOperation {
+    data object Idle : PassportStudioOperation
+    data object LoadingPhoto : PassportStudioOperation
+    data object SegmentingBackground : PassportStudioOperation
+    data object ExportingSingle : PassportStudioOperation
+    data object ExportingSheet : PassportStudioOperation
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PassportPhotoScreen(onBack: () -> Unit) {
@@ -76,7 +99,7 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
     }
 
     var selectedColor by remember { mutableStateOf(bgPalette[0].color) }
-    var selectedDimension by remember { mutableStateOf("3.5 x 4.5 cm (Standard)") }
+    var selectedDimension by remember { mutableStateOf(PassportSizeStandard.INDIA_UK_EU_CM) }
     var showGuideOverlay by remember { mutableStateOf(true) }
 
     var cropScale by remember { mutableFloatStateOf(1f) }
@@ -84,10 +107,16 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
     var cropOffsetY by remember { mutableFloatStateOf(0f) }
 
     var originalBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    // Stores the transparent foreground cutout so changing background color is instant!
     var cutoutForegroundBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isProcessing by remember { mutableStateOf(false) }
-    var isSaving by remember { mutableStateOf(false) }
+    var studioOperation by remember { mutableStateOf<PassportStudioOperation>(PassportStudioOperation.Idle) }
+    var photoSessionGeneration by remember { mutableIntStateOf(0) }
+
+    val isProcessing = studioOperation is PassportStudioOperation.SegmentingBackground ||
+            studioOperation is PassportStudioOperation.LoadingPhoto
+    val isSaving = studioOperation is PassportStudioOperation.ExportingSingle ||
+            studioOperation is PassportStudioOperation.ExportingSheet
+    val isBusy = studioOperation != PassportStudioOperation.Idle
+
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -95,22 +124,30 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
+            val nextGen = photoSessionGeneration + 1
+            photoSessionGeneration = nextGen
+            studioOperation = PassportStudioOperation.LoadingPhoto
             scope.launch {
                 val bitmap = withContext(Dispatchers.IO) {
                     decodeSampledBitmapFromUri(context, it, 2048)
                 }
-                originalBitmap = bitmap
-                cutoutForegroundBitmap = null
-                cropScale = 1f
-                cropOffsetX = 0f
-                cropOffsetY = 0f
+                if (photoSessionGeneration == nextGen) {
+                    originalBitmap = bitmap
+                    cutoutForegroundBitmap = null
+                    cropScale = 1f
+                    cropOffsetX = 0f
+                    cropOffsetY = 0f
+                    studioOperation = PassportStudioOperation.Idle
+                }
             }
         }
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
                 title = {
                     Column {
                         Text("Passport Photo Studio", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
@@ -208,12 +245,7 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                         Box(
                             modifier = Modifier
                                 .height(290.dp)
-                                .aspectRatio(
-                                    when {
-                                        selectedDimension.contains("2 x 2") || selectedDimension.contains("600 x 600") -> 1f
-                                        else -> 413f / 531f
-                                    }
-                                )
+                                .aspectRatio(selectedDimension.aspectRatio)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(selectedColor)
                                 .border(2.dp, Color.White.copy(alpha = 0.7f), RoundedCornerShape(8.dp))
@@ -300,7 +332,8 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             OutlinedButton(
-                                onClick = { launcher.launch("image/*") },
+                                onClick = { if (!isBusy) launcher.launch("image/*") },
+                                enabled = !isBusy,
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)
@@ -312,23 +345,26 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
 
                             Button(
                                 onClick = {
-                                    if (!isProcessing && originalBitmap != null) {
+                                    val srcBmp = originalBitmap
+                                    if (!isBusy && srcBmp != null) {
                                         if (cutoutForegroundBitmap != null) {
-                                            // Toggle back to original if already removed
                                             cutoutForegroundBitmap = null
                                         } else {
-                                            isProcessing = true
-                                            extractForegroundCutout(originalBitmap!!) { resultBmp ->
-                                                cutoutForegroundBitmap = resultBmp
-                                                isProcessing = false
-                                                if (resultBmp == null) {
-                                                    Toast.makeText(context, "Could not isolate subject", Toast.LENGTH_SHORT).show()
+                                            val activeGen = photoSessionGeneration
+                                            studioOperation = PassportStudioOperation.SegmentingBackground
+                                            extractForegroundCutout(srcBmp) { resultBmp ->
+                                                if (photoSessionGeneration == activeGen) {
+                                                    cutoutForegroundBitmap = resultBmp
+                                                    studioOperation = PassportStudioOperation.Idle
+                                                    if (resultBmp == null) {
+                                                        Toast.makeText(context, "Could not isolate subject", Toast.LENGTH_SHORT).show()
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 },
-                                enabled = !isProcessing,
+                                enabled = !isBusy,
                                 modifier = Modifier.weight(1.3f),
                                 shape = RoundedCornerShape(12.dp),
                                 colors = ButtonDefaults.buttonColors(
@@ -445,21 +481,15 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text("Official Size Standard", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                        val dimensions = listOf(
-                            "3.5 x 4.5 cm (Standard)" to "413 × 531 px • India / UK / EU",
-                            "2 x 2 inch (US)" to "600 × 600 px • US Visa & Passport",
-                            "35 x 45 mm" to "413 × 531 px • ICAO Standard",
-                            "600 x 600 px" to "1:1 Square • Online Portals"
-                        )
-                        dimensions.forEach { (dim, subtitle) ->
-                            val isSelected = selectedDimension == dim
+                        PassportSizeStandard.entries.forEach { standard ->
+                            val isSelected = selectedDimension == standard
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                                 border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { selectedDimension = dim }
+                                    .clickable { selectedDimension = standard }
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -467,13 +497,13 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                                 ) {
                                     RadioButton(
                                         selected = isSelected,
-                                        onClick = { selectedDimension = dim },
+                                        onClick = { selectedDimension = standard },
                                         modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Column {
-                                        Text(dim, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                                        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Text(standard.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                        Text(standard.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                             }
@@ -488,9 +518,9 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                 ) {
                     Button(
                         onClick = {
-                            if (!isSaving) {
+                            if (!isBusy) {
                                 scope.launch {
-                                    isSaving = true
+                                    studioOperation = PassportStudioOperation.ExportingSingle
                                     try {
                                         val bmpToUse = cutoutForegroundBitmap ?: originalBitmap
                                         if (bmpToUse != null) {
@@ -499,19 +529,21 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                                                 cropScale, cropOffsetX, cropOffsetY
                                             )
                                             if (jpgFile != null) {
-                                                ImageProcessor.exportToPublicDocuments(context, jpgFile, jpgFile.name, "image/jpeg")
-                                                Toast.makeText(context, "Saved Single Photo to Documents/Dasmo Scan/${jpgFile.name}", Toast.LENGTH_LONG).show()
+                                                val exportedName = jpgFile.name
+                                                ImageProcessor.exportToPublicDocuments(context, jpgFile, exportedName, "image/jpeg")
+                                                try { jpgFile.delete() } catch (_: Exception) {}
+                                                Toast.makeText(context, "Saved Single Photo to Documents/Dasmo Scan/$exportedName", Toast.LENGTH_LONG).show()
                                             } else {
                                                 Toast.makeText(context, "Failed to save photo", Toast.LENGTH_SHORT).show()
                                             }
                                         }
                                     } finally {
-                                        isSaving = false
+                                        studioOperation = PassportStudioOperation.Idle
                                     }
                                 }
                             }
                         },
-                        enabled = !isSaving,
+                        enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -519,14 +551,18 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(if (isSaving) "Saving..." else "Save Single Passport Photo (JPEG)", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (studioOperation is PassportStudioOperation.ExportingSingle) "Saving Single Photo..."
+                            else "Save Single Passport Photo (JPEG)",
+                            fontWeight = FontWeight.Bold
+                        )
                     }
 
                     OutlinedButton(
                         onClick = {
-                            if (!isSaving) {
+                            if (!isBusy) {
                                 scope.launch {
-                                    isSaving = true
+                                    studioOperation = PassportStudioOperation.ExportingSheet
                                     try {
                                         val bmpToUse = cutoutForegroundBitmap ?: originalBitmap
                                         if (bmpToUse != null) {
@@ -535,19 +571,21 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                                                 cropScale, cropOffsetX, cropOffsetY
                                             )
                                             if (sheetFile != null) {
-                                                ImageProcessor.exportToPublicDocuments(context, sheetFile, sheetFile.name, "image/jpeg")
-                                                Toast.makeText(context, "Saved 8-Photo Print Sheet to Documents/Dasmo Scan/${sheetFile.name}", Toast.LENGTH_LONG).show()
+                                                val exportedName = sheetFile.name
+                                                ImageProcessor.exportToPublicDocuments(context, sheetFile, exportedName, "image/jpeg")
+                                                try { sheetFile.delete() } catch (_: Exception) {}
+                                                Toast.makeText(context, "Saved 8-Photo Print Sheet to Documents/Dasmo Scan/$exportedName", Toast.LENGTH_LONG).show()
                                             } else {
                                                 Toast.makeText(context, "Failed to generate print sheet", Toast.LENGTH_SHORT).show()
                                             }
                                         }
                                     } finally {
-                                        isSaving = false
+                                        studioOperation = PassportStudioOperation.Idle
                                     }
                                 }
                             }
                         },
-                        enabled = !isSaving,
+                        enabled = !isBusy,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -555,7 +593,11 @@ fun PassportPhotoScreen(onBack: () -> Unit) {
                     ) {
                         Icon(Icons.Default.GridView, contentDescription = null, modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Save 8-Photo 4×6 Print Sheet (JPEG)", fontWeight = FontWeight.Bold)
+                        Text(
+                            if (studioOperation is PassportStudioOperation.ExportingSheet) "Generating 4×6 Sheet..."
+                            else "Save 8-Photo 4×6 Print Sheet (JPEG)",
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
 
@@ -628,28 +670,14 @@ private fun extractForegroundCutout(
 
 private fun renderSinglePassportBitmap(
     bitmap: Bitmap,
-    dimension: String,
+    dimension: PassportSizeStandard,
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,
     cropOffsetY: Float
 ): Bitmap {
-    val widthPixels: Int
-    val heightPixels: Int
-    when {
-        dimension.contains("3.5 x 4.5 cm") || dimension.contains("35 x 45 mm") -> {
-            widthPixels = 413
-            heightPixels = 531
-        }
-        dimension.contains("2 x 2 inch") || dimension.contains("600 x 600 px") -> {
-            widthPixels = 600
-            heightPixels = 600
-        }
-        else -> {
-            widthPixels = 413
-            heightPixels = 531
-        }
-    }
+    val widthPixels = dimension.widthPx
+    val heightPixels = dimension.heightPx
 
     val outputBitmap = Bitmap.createBitmap(widthPixels, heightPixels, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(outputBitmap)
@@ -677,7 +705,7 @@ private fun renderSinglePassportBitmap(
 private suspend fun generatePassportJpeg(
     context: Context,
     bitmap: Bitmap,
-    dimension: String,
+    dimension: PassportSizeStandard,
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,
@@ -703,7 +731,7 @@ private suspend fun generatePassportJpeg(
 private suspend fun generatePassportSheetJpeg(
     context: Context,
     bitmap: Bitmap,
-    dimension: String,
+    dimension: PassportSizeStandard,
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,

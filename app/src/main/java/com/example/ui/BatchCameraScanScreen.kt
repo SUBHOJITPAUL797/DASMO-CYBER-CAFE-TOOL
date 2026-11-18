@@ -56,6 +56,17 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
+enum class ShutterCaptureState {
+    IDLE,
+    CAPTURING
+}
+
+sealed interface BatchCameraOverlayState {
+    data object None : BatchCameraOverlayState
+    data object ReviewSheet : BatchCameraOverlayState
+    data class CustomPagesDialog(val inputText: String) : BatchCameraOverlayState
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BatchCameraScanScreen(
@@ -115,21 +126,18 @@ fun BatchCameraScanScreen(
     }
 
     var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) }
-    var isCapturing by remember { mutableStateOf(false) }
-    var showFlashEffect by remember { mutableStateOf(false) }
-    var showReviewSheet by remember { mutableStateOf(false) }
+    var shutterState by remember { mutableStateOf(ShutterCaptureState.IDLE) }
+    var overlayState by remember { mutableStateOf<BatchCameraOverlayState>(BatchCameraOverlayState.None) }
     var showGridOverlay by remember { mutableStateOf(true) }
 
     var pagesPerDoc by remember { mutableIntStateOf(initialPagesPerDoc.coerceAtLeast(1)) }
-    var showCustomPagesDialog by remember { mutableStateOf(false) }
-    var customInputText by remember { mutableStateOf(pagesPerDoc.toString()) }
 
     val capturedPageUris = remember { mutableStateListOf<Uri>() }
     val capturedPageFiles = remember { mutableStateListOf<File>() }
 
     BackHandler {
-        if (showReviewSheet) {
-            showReviewSheet = false
+        if (overlayState != BatchCameraOverlayState.None) {
+            overlayState = BatchCameraOverlayState.None
         } else {
             capturedPageFiles.forEach { file ->
                 try { file.delete() } catch (_: Exception) {}
@@ -159,10 +167,9 @@ fun BatchCameraScanScreen(
 
     fun takeContinuousPageSnap() {
         val capture = imageCapture ?: return
-        if (isCapturing) return
+        if (shutterState != ShutterCaptureState.IDLE) return
 
-        isCapturing = true
-        showFlashEffect = true
+        shutterState = ShutterCaptureState.CAPTURING
         triggerVibration()
 
         val photoFile = File(context.cacheDir, "batch_scan_${UUID.randomUUID()}.jpg")
@@ -180,15 +187,13 @@ fun BatchCameraScanScreen(
                         withContext(Dispatchers.Main) {
                             capturedPageFiles.add(fixedFile)
                             capturedPageUris.add(uri)
-                            isCapturing = false
-                            showFlashEffect = false
+                            shutterState = ShutterCaptureState.IDLE
                         }
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
-                    isCapturing = false
-                    showFlashEffect = false
+                    shutterState = ShutterCaptureState.IDLE
                     Toast.makeText(context, "Capture failed: ${exception.message}", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -248,7 +253,7 @@ fun BatchCameraScanScreen(
         )
 
         // Shutter Flash animation effect
-        if (showFlashEffect) {
+        if (shutterState == ShutterCaptureState.CAPTURING) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -491,8 +496,7 @@ fun BatchCameraScanScreen(
                             .clip(RoundedCornerShape(8.dp))
                             .background(if (isCustom) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.12f))
                             .clickable {
-                                customInputText = pagesPerDoc.toString()
-                                showCustomPagesDialog = true
+                                overlayState = BatchCameraOverlayState.CustomPagesDialog(pagesPerDoc.toString())
                             }
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center
@@ -522,7 +526,7 @@ fun BatchCameraScanScreen(
                                 .size(56.dp, 72.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .border(1.5.dp, Color.White, RoundedCornerShape(8.dp))
-                                .clickable { showReviewSheet = true }
+                                .clickable { overlayState = BatchCameraOverlayState.ReviewSheet }
                         ) {
                             Image(
                                 painter = rememberAsyncImagePainter(uri),
@@ -561,7 +565,7 @@ fun BatchCameraScanScreen(
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color.White.copy(alpha = 0.15f))
                         .clickable(enabled = capturedPageUris.isNotEmpty()) {
-                            showReviewSheet = true
+                            overlayState = BatchCameraOverlayState.ReviewSheet
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -599,6 +603,7 @@ fun BatchCameraScanScreen(
                 }
 
                 // Rapid Shutter Button
+                val isCapturing = shutterState == ShutterCaptureState.CAPTURING
                 Box(
                     modifier = Modifier
                         .size(76.dp)
@@ -656,246 +661,256 @@ fun BatchCameraScanScreen(
             }
         }
 
-        // Custom Pages Per Document Input Dialog
-        if (showCustomPagesDialog) {
-            androidx.compose.ui.window.Dialog(
-                onDismissRequest = { showCustomPagesDialog = false },
-                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
-            ) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .wrapContentHeight()
-                        .padding(vertical = 16.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 6.dp,
-                    shadowElevation = 8.dp
+        // Exclusive Modal Overlays (Custom Pages Per Document Dialog or Review Pages Sheet)
+        when (val activeOverlay = overlayState) {
+            BatchCameraOverlayState.None -> Unit
+
+            is BatchCameraOverlayState.CustomPagesDialog -> {
+                val customInputText = activeOverlay.inputText
+                androidx.compose.ui.window.Dialog(
+                    onDismissRequest = { overlayState = BatchCameraOverlayState.None },
+                    properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, dismissOnBackPress = true, dismissOnClickOutside = true)
                 ) {
-                    Column(
+                    Surface(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(20.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                            .fillMaxWidth(0.92f)
+                            .wrapContentHeight()
+                            .padding(vertical = 16.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 6.dp,
+                        shadowElevation = 8.dp
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(20.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            Text("Pages Per Document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            IconButton(onClick = { showCustomPagesDialog = false }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                        }
-
-                        Text(
-                            text = "Enter how many scanned pages to combine into each PDF/Document file (e.g. 5, 10, 20...):",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        // Quick preset pills
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            listOf(1, 2, 3, 5, 10, 20).forEach { presetNum ->
-                                val isChosen = customInputText == presetNum.toString()
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = if (isChosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable { customInputText = presetNum.toString() }
-                                ) {
-                                    Text(
-                                        text = "$presetNum",
-                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.SemiBold,
-                                        color = if (isChosen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(vertical = 8.dp)
-                                    )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Pages Per Document", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                                IconButton(onClick = { overlayState = BatchCameraOverlayState.None }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Close, contentDescription = "Close", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
-                        }
 
-                        // Stepper & Direct TextField
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            IconButton(
-                                onClick = {
-                                    val current = customInputText.toIntOrNull() ?: 2
-                                    if (current > 1) customInputText = (current - 1).toString()
-                                },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-                            ) {
-                                Text("-", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                            }
-
-                            OutlinedTextField(
-                                value = customInputText,
-                                onValueChange = { input ->
-                                    if (input.all { it.isDigit() } && input.length <= 3) {
-                                        customInputText = input
-                                    }
-                                },
-                                label = { Text("Pages Per File") },
-                                singleLine = true,
-                                textStyle = androidx.compose.ui.text.TextStyle(
-                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                    fontSize = 18.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
-                                ),
-                                modifier = Modifier.weight(1f)
+                            Text(
+                                text = "Enter how many scanned pages to combine into each PDF/Document file (e.g. 5, 10, 20...):",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
 
-                            IconButton(
-                                onClick = {
-                                    val current = customInputText.toIntOrNull() ?: 2
-                                    if (current < 100) customInputText = (current + 1).toString()
-                                },
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                            // Quick preset pills
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                listOf(1, 2, 3, 5, 10, 20).forEach { presetNum ->
+                                    val isChosen = customInputText == presetNum.toString()
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isChosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clickable {
+                                                overlayState = BatchCameraOverlayState.CustomPagesDialog(presetNum.toString())
+                                            }
+                                    ) {
+                                        Text(
+                                            text = "$presetNum",
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (isChosen) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                            color = if (isChosen) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(vertical = 8.dp)
+                                        )
+                                    }
+                                }
                             }
-                        }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { showCustomPagesDialog = false },
-                                modifier = Modifier.weight(1f).height(46.dp),
-                                shape = RoundedCornerShape(12.dp)
+                            // Stepper & Direct TextField
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text("Cancel")
+                                IconButton(
+                                    onClick = {
+                                        val current = customInputText.toIntOrNull() ?: 2
+                                        if (current > 1) {
+                                            overlayState = BatchCameraOverlayState.CustomPagesDialog((current - 1).toString())
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                                ) {
+                                    Text("-", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                }
+
+                                OutlinedTextField(
+                                    value = customInputText,
+                                    onValueChange = { input ->
+                                        if (input.all { it.isDigit() } && input.length <= 3) {
+                                            overlayState = BatchCameraOverlayState.CustomPagesDialog(input)
+                                        }
+                                    },
+                                    label = { Text("Pages Per File") },
+                                    singleLine = true,
+                                    textStyle = androidx.compose.ui.text.TextStyle(
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                IconButton(
+                                    onClick = {
+                                        val current = customInputText.toIntOrNull() ?: 2
+                                        if (current < 100) {
+                                            overlayState = BatchCameraOverlayState.CustomPagesDialog((current + 1).toString())
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
+                                ) {
+                                    Text("+", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
-                            Button(
-                                onClick = {
-                                    val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
-                                    pagesPerDoc = num
-                                    showCustomPagesDialog = false
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                modifier = Modifier.weight(1f).height(46.dp)
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Text("Apply", fontWeight = FontWeight.Bold)
+                                OutlinedButton(
+                                    onClick = { overlayState = BatchCameraOverlayState.None },
+                                    modifier = Modifier.weight(1f).height(46.dp),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("Cancel")
+                                }
+                                Button(
+                                    onClick = {
+                                        val num = customInputText.toIntOrNull()?.coerceIn(1, 100) ?: 2
+                                        pagesPerDoc = num
+                                        overlayState = BatchCameraOverlayState.None
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    modifier = Modifier.weight(1f).height(46.dp)
+                                ) {
+                                    Text("Apply", fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Review Pages Sheet / Modal
-        if (showReviewSheet) {
-            AlertDialog(
-                onDismissRequest = { showReviewSheet = false },
-                containerColor = MaterialTheme.colorScheme.surface,
-                title = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Review Batch (${capturedPageUris.size} Pages)",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        IconButton(onClick = { showReviewSheet = false }) {
-                            Icon(Icons.Default.Close, contentDescription = "Close review")
+            BatchCameraOverlayState.ReviewSheet -> {
+                AlertDialog(
+                    onDismissRequest = { overlayState = BatchCameraOverlayState.None },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    title = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Review Batch (${capturedPageUris.size} Pages)",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            IconButton(onClick = { overlayState = BatchCameraOverlayState.None }) {
+                                Icon(Icons.Default.Close, contentDescription = "Close review")
+                            }
                         }
-                    }
-                },
-                text = {
-                    Box(modifier = Modifier.height(360.dp)) {
-                        if (capturedPageUris.isEmpty()) {
-                            Text("No pages snapped yet.", modifier = Modifier.align(Alignment.Center))
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                itemsIndexed(capturedPageUris) { index, uri ->
-                                    Box(
-                                        modifier = Modifier
-                                            .aspectRatio(0.75f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                                    ) {
-                                        Image(
-                                            painter = rememberAsyncImagePainter(uri),
-                                            contentDescription = "Page ${index + 1}",
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize()
-                                        )
+                    },
+                    text = {
+                        Box(modifier = Modifier.height(360.dp)) {
+                            if (capturedPageUris.isEmpty()) {
+                                Text("No pages snapped yet.", modifier = Modifier.align(Alignment.Center))
+                            } else {
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(3),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxSize()
+                                ) {
+                                    itemsIndexed(capturedPageUris) { index, uri ->
                                         Box(
                                             modifier = Modifier
-                                                .align(Alignment.TopStart)
-                                                .padding(4.dp)
-                                                .background(Color.Black.copy(alpha = 0.7f), CircleShape)
-                                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                .aspectRatio(0.75f)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
                                         ) {
-                                            Text(
-                                                text = "P${index + 1}",
-                                                color = Color.White,
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold
+                                            Image(
+                                                painter = rememberAsyncImagePainter(uri),
+                                                contentDescription = "Page ${index + 1}",
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
                                             )
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                capturedPageUris.removeAt(index)
-                                                if (index < capturedPageFiles.size) {
-                                                    val removedFile = capturedPageFiles.removeAt(index)
-                                                    try { removedFile.delete() } catch (_: Exception) {}
-                                                }
-                                            },
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(2.dp)
-                                                .size(24.dp)
-                                                .background(Color.Red, CircleShape)
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.Close,
-                                                contentDescription = "Delete Page",
-                                                tint = Color.White,
-                                                modifier = Modifier.size(14.dp)
-                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopStart)
+                                                    .padding(4.dp)
+                                                    .background(Color.Black.copy(alpha = 0.7f), CircleShape)
+                                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(
+                                                    text = "P${index + 1}",
+                                                    color = Color.White,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            IconButton(
+                                                onClick = {
+                                                    capturedPageUris.removeAt(index)
+                                                    if (index < capturedPageFiles.size) {
+                                                        val removedFile = capturedPageFiles.removeAt(index)
+                                                        try { removedFile.delete() } catch (_: Exception) {}
+                                                    }
+                                                },
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(2.dp)
+                                                    .size(24.dp)
+                                                    .background(Color.Red, CircleShape)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Delete Page",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { overlayState = BatchCameraOverlayState.None },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Resume Continuous Snap")
+                        }
                     }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = { showReviewSheet = false },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Text("Resume Continuous Snap")
-                    }
-                }
-            )
+                )
+            }
         }
     }
 }
