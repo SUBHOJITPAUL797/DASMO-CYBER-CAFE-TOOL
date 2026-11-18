@@ -23,6 +23,11 @@ import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import com.google.android.gms.auth.api.signin.GoogleSignInClient
 
+private enum class DiagnosticsPanelState {
+    COLLAPSED,
+    EXPANDED
+}
+
 @Composable
 fun AuthGuardScreen(
     authState: AuthState,
@@ -38,7 +43,8 @@ fun AuthGuardScreen(
     val context = LocalContext.current
     val deviceModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
 
-    var showDiagnostics by remember { mutableStateOf(false) }
+    var diagnosticsPanelState by remember { mutableStateOf(DiagnosticsPanelState.COLLAPSED) }
+    val isDiagnosticsExpanded = diagnosticsPanelState == DiagnosticsPanelState.EXPANDED
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -323,21 +329,27 @@ fun AuthGuardScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 TextButton(
-                    onClick = { showDiagnostics = !showDiagnostics }
+                    onClick = {
+                        diagnosticsPanelState = if (isDiagnosticsExpanded) {
+                            DiagnosticsPanelState.COLLAPSED
+                        } else {
+                            DiagnosticsPanelState.EXPANDED
+                        }
+                    }
                 ) {
                     Icon(
-                        imageVector = if (showDiagnostics) Icons.Default.ExpandLess else Icons.Default.Terminal,
+                        imageVector = if (isDiagnosticsExpanded) Icons.Default.ExpandLess else Icons.Default.Terminal,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (showDiagnostics) "Hide Connection Diagnostics" else "Connection Diagnostics (${dbLogs.size})",
+                        text = if (isDiagnosticsExpanded) "Hide Connection Diagnostics" else "Connection Diagnostics (${dbLogs.size})",
                         style = MaterialTheme.typography.labelMedium
                     )
                 }
 
-                if (showDiagnostics) {
+                if (isDiagnosticsExpanded) {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()

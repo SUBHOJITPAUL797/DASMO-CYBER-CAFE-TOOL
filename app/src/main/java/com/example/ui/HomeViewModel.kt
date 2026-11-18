@@ -85,12 +85,71 @@ enum class StatusBannerTone {
     ERROR
 }
 
+sealed interface StatusBannerState {
+    data object Hidden : StatusBannerState
+    data class Processing(val message: String) : StatusBannerState
+    data class Visible(
+        val message: String,
+        val tone: StatusBannerTone
+    ) : StatusBannerState
+}
+
+sealed interface FolderBrowserAsyncState {
+    data object Idle : FolderBrowserAsyncState
+    data object Loading : FolderBrowserAsyncState
+    data object Loaded : FolderBrowserAsyncState
+    data class DiagnosticNotice(val message: String, val isSuccess: Boolean) : FolderBrowserAsyncState
+    data class Error(val message: String) : FolderBrowserAsyncState
+}
+
+data class DriveFolderBrowserState(
+    val pathStack: List<GoogleDriveFolder> = listOf(GoogleDriveFolder("root", "My Drive")),
+    val subfolders: List<GoogleDriveFolder> = emptyList(),
+    val asyncState: FolderBrowserAsyncState = FolderBrowserAsyncState.Idle
+) {
+    val currentFolder: GoogleDriveFolder
+        get() = pathStack.lastOrNull() ?: GoogleDriveFolder("root", "My Drive")
+    val currentFolderId: String
+        get() = currentFolder.id
+    val currentFolderName: String
+        get() = currentFolder.name
+    val isLoading: Boolean
+        get() = asyncState is FolderBrowserAsyncState.Loading
+    val errorMessage: String?
+        get() = (asyncState as? FolderBrowserAsyncState.Error)?.message
+    val diagnosticNotice: FolderBrowserAsyncState.DiagnosticNotice?
+        get() = asyncState as? FolderBrowserAsyncState.DiagnosticNotice
+}
+
+sealed interface DriveFilesUiState {
+    data object Idle : DriveFilesUiState
+    data class Loading(val cachedFiles: List<com.example.network.DriveFile> = emptyList()) : DriveFilesUiState
+    data class Success(val files: List<com.example.network.DriveFile>) : DriveFilesUiState
+    data class Error(
+        val message: String,
+        val cachedFiles: List<com.example.network.DriveFile> = emptyList()
+    ) : DriveFilesUiState
+
+    val currentFiles: List<com.example.network.DriveFile>
+        get() = when (this) {
+            Idle -> emptyList()
+            is Loading -> cachedFiles
+            is Success -> files
+            is Error -> cachedFiles
+        }
+    val isLoading: Boolean
+        get() = this is Loading
+    val errorMessage: String?
+        get() = (this as? Error)?.message
+}
+
 data class PendingDocument(
     val queueId: String,
     val compressedFile: File,
     val initialPersonName: String,
     val initialDocumentType: String,
-    val pageFiles: List<File>? = null
+    val pageFiles: List<File>? = null,
+    val initialFormat: UploadFormat = UploadFormat.PDF
 )
 
 data class BatchGroup(
@@ -743,18 +802,49 @@ class HomeViewModel(
         }
     }
 
-    private val _isProcessing = MutableStateFlow(false)
-    val isProcessing = _isProcessing.asStateFlow()
+    private val _statusBannerState = MutableStateFlow<StatusBannerState>(StatusBannerState.Hidden)
+    val statusBannerState: StateFlow<StatusBannerState> = _statusBannerState.asStateFlow()
 
-    private val _statusMessage = MutableStateFlow("")
-    val statusMessage = _statusMessage.asStateFlow()
+    val isProcessing: StateFlow<Boolean> = _statusBannerState
+        .map { it is StatusBannerState.Processing }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
-    private val _statusBannerTone = MutableStateFlow(StatusBannerTone.INFO)
-    val statusBannerTone = _statusBannerTone.asStateFlow()
+    val statusMessage: StateFlow<String> = _statusBannerState
+        .map { state ->
+            when (state) {
+                StatusBannerState.Hidden -> ""
+                is StatusBannerState.Processing -> state.message
+                is StatusBannerState.Visible -> state.message
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    val statusBannerTone: StateFlow<StatusBannerTone> = _statusBannerState
+        .map { state ->
+            when (state) {
+                StatusBannerState.Hidden -> StatusBannerTone.INFO
+                is StatusBannerState.Processing -> StatusBannerTone.INFO
+                is StatusBannerState.Visible -> state.tone
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, StatusBannerTone.INFO)
+
+    private fun postProcessing(message: String) {
+        _statusBannerState.value = StatusBannerState.Processing(message.ifBlank { "Optimizing & processing document..." })
+    }
+
+    private fun clearProcessingIfActive() {
+        _statusBannerState.update { state ->
+            if (state is StatusBannerState.Processing) StatusBannerState.Hidden else state
+        }
+    }
 
     private fun postStatusMessage(message: String, tone: StatusBannerTone = inferBannerTone(message)) {
-        _statusMessage.value = message
-        _statusBannerTone.value = tone
+        if (message.isBlank()) {
+            _statusBannerState.value = StatusBannerState.Hidden
+        } else {
+            _statusBannerState.value = StatusBannerState.Visible(message = message, tone = tone)
+        }
     }
 
     private fun inferBannerTone(message: String): StatusBannerTone {
@@ -769,8 +859,7 @@ class HomeViewModel(
     }
 
     fun clearStatusMessage() {
-        _statusMessage.value = ""
-        _statusBannerTone.value = StatusBannerTone.INFO
+        _statusBannerState.value = StatusBannerState.Hidden
     }
 
     fun runDiagnostics() {
@@ -821,27 +910,45 @@ class HomeViewModel(
     val pendingDocument: StateFlow<PendingDocument?> = _pendingDocuments.map { it.firstOrNull() }
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
-    // Google Drive folder selection session details
-    private val _currentFolderId = MutableStateFlow("root")
-    val currentFolderId = _currentFolderId.asStateFlow()
+    // Google Drive folder selection session state machine
+    private val _folderBrowserState = MutableStateFlow(DriveFolderBrowserState())
+    val folderBrowserState: StateFlow<DriveFolderBrowserState> = _folderBrowserState.asStateFlow()
 
-    private val _currentFolderName = MutableStateFlow("My Drive")
-    val currentFolderName = _currentFolderName.asStateFlow()
+    val currentFolderId: StateFlow<String> = _folderBrowserState
+        .map { it.currentFolderId }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "root")
 
-    private val _folderPathStack = MutableStateFlow<List<GoogleDriveFolder>>(listOf(GoogleDriveFolder("root", "My Drive")))
-    val folderPathStack = _folderPathStack.asStateFlow()
+    val currentFolderName: StateFlow<String> = _folderBrowserState
+        .map { it.currentFolderName }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "My Drive")
 
-    private val _subfolders = MutableStateFlow<List<GoogleDriveFolder>>(emptyList())
-    val subfolders = _subfolders.asStateFlow()
+    val folderPathStack: StateFlow<List<GoogleDriveFolder>> = _folderBrowserState
+        .map { it.pathStack }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, listOf(GoogleDriveFolder("root", "My Drive")))
 
-    private val _isFolderLoading = MutableStateFlow(false)
-    val isFolderLoading = _isFolderLoading.asStateFlow()
+    val subfolders: StateFlow<List<GoogleDriveFolder>> = _folderBrowserState
+        .map { it.subfolders }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    private val _folderError = MutableStateFlow<String?>(null)
-    val folderError = _folderError.asStateFlow()
+    val isFolderLoading: StateFlow<Boolean> = _folderBrowserState
+        .map { it.isLoading }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val folderError: StateFlow<String?> = _folderBrowserState
+        .map { it.errorMessage }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val folderDiagnostic: StateFlow<FolderBrowserAsyncState.DiagnosticNotice?> = _folderBrowserState
+        .map { it.diagnosticNotice }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun clearFolderError() {
-        _folderError.value = null
+        _folderBrowserState.update { state ->
+            if (state.asyncState is FolderBrowserAsyncState.Error ||
+                state.asyncState is FolderBrowserAsyncState.DiagnosticNotice) {
+                state.copy(asyncState = FolderBrowserAsyncState.Idle)
+            } else state
+        }
     }
 
     private val _recoveryIntent = MutableStateFlow<android.content.Intent?>(null)
@@ -851,30 +958,36 @@ class HomeViewModel(
         _recoveryIntent.value = null
     }
 
-    private val _driveFiles = MutableStateFlow<List<com.example.network.DriveFile>>(emptyList())
-    val driveFiles = _driveFiles.asStateFlow()
+    private val _driveFilesUiState = MutableStateFlow<DriveFilesUiState>(DriveFilesUiState.Idle)
+    val driveFilesUiState: StateFlow<DriveFilesUiState> = _driveFilesUiState.asStateFlow()
 
-    private val _isDriveFilesLoading = MutableStateFlow(false)
-    val isDriveFilesLoading = _isDriveFilesLoading.asStateFlow()
+    val driveFiles: StateFlow<List<com.example.network.DriveFile>> = _driveFilesUiState
+        .map { it.currentFiles }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    private val _driveFilesError = MutableStateFlow<String?>(null)
-    val driveFilesError = _driveFilesError.asStateFlow()
+    val isDriveFilesLoading: StateFlow<Boolean> = _driveFilesUiState
+        .map { it.isLoading }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val driveFilesError: StateFlow<String?> = _driveFilesUiState
+        .map { it.errorMessage }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun fetchDriveFiles(context: Context) {
         val email = googleEmail.value
         if (email.isNullOrEmpty()) {
-            _driveFiles.value = emptyList()
+            _driveFilesUiState.value = DriveFilesUiState.Idle
             return
         }
         viewModelScope.launch {
-            _isDriveFilesLoading.value = true
-            _driveFilesError.value = null
+            val previousFiles = _driveFilesUiState.value.currentFiles
+            _driveFilesUiState.value = DriveFilesUiState.Loading(cachedFiles = previousFiles)
             try {
                 val obtainedToken = getAccessToken(context, email)
                 if (obtainedToken != null) {
                     val rootFolderId = driveFolderId.value
                     val rootNameStr = driveFolderName.value ?: "My Drive"
-                    
+
                     // 1. Fetch direct files & immediate subfolders in parallel
                     val (direct, subFolderDefs) = coroutineScope {
                         val directDeferred = async(Dispatchers.IO) {
@@ -910,15 +1023,19 @@ class HomeViewModel(
                     subFilesLists.forEach { combined.addAll(it) }
 
                     val sorted = combined.sortedByDescending { it.createdTime ?: "" }
-                    _driveFiles.value = sorted
+                    _driveFilesUiState.value = DriveFilesUiState.Success(files = sorted)
                 } else {
-                    _driveFilesError.value = "Failed to obtain credentials"
+                    _driveFilesUiState.value = DriveFilesUiState.Error(
+                        message = "Failed to obtain credentials",
+                        cachedFiles = previousFiles
+                    )
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _driveFilesError.value = e.localizedMessage ?: e.message
-            } finally {
-                _isDriveFilesLoading.value = false
+                _driveFilesUiState.value = DriveFilesUiState.Error(
+                    message = e.localizedMessage ?: e.message ?: "Unknown Drive error",
+                    cachedFiles = previousFiles
+                )
             }
         }
     }
@@ -1006,7 +1123,6 @@ class HomeViewModel(
             } else item
         } }
         clearStatusMessage()
-        _isProcessing.value = false
     }
 
     fun setGoogleEmail(email: String?) {
@@ -1016,34 +1132,38 @@ class HomeViewModel(
                 currentSessionToken = null
                 // reset folder settings
                 settingsRepository.setDriveFolder("root", "My Drive")
-                _currentFolderId.value = "root"
-                _currentFolderName.value = "My Drive"
-                _folderPathStack.value = listOf(GoogleDriveFolder("root", "My Drive"))
-                _subfolders.value = emptyList()
+                _folderBrowserState.value = DriveFolderBrowserState()
+                _driveFilesUiState.value = DriveFilesUiState.Idle
             }
         }
     }
 
-    fun fetchSubfolders(context: Context, folderId: String = _currentFolderId.value) {
+    fun fetchSubfolders(context: Context, folderId: String = _folderBrowserState.value.currentFolderId) {
         val email = googleEmail.value ?: return
         viewModelScope.launch {
-            _isFolderLoading.value = true
+            _folderBrowserState.update { it.copy(asyncState = FolderBrowserAsyncState.Loading) }
             var obtainedToken: String? = null
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken != null) {
                     val list = GoogleDriveClient.listFolders(obtainedToken, folderId)
-                    _subfolders.value = list
-                    _folderError.value = null
+                    _folderBrowserState.update {
+                        it.copy(
+                            subfolders = list,
+                            asyncState = FolderBrowserAsyncState.Loaded
+                        )
+                    }
                 } else {
-                    _folderError.value = "Failed to retrieve access token"
+                    _folderBrowserState.update {
+                        it.copy(asyncState = FolderBrowserAsyncState.Error("Failed to retrieve access token"))
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _folderError.value = e.localizedMessage ?: e.message
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.Error(e.localizedMessage ?: e.message ?: "Failed to load folders"))
+                }
                 obtainedToken?.let { invalidateCachedToken(context, it) }
-            } finally {
-                _isFolderLoading.value = false
             }
         }
     }
@@ -1051,29 +1171,31 @@ class HomeViewModel(
     fun navigateToFolder(context: Context, id: String, name: String) {
         val email = googleEmail.value ?: return
         viewModelScope.launch {
-            _isFolderLoading.value = true
+            _folderBrowserState.update { it.copy(asyncState = FolderBrowserAsyncState.Loading) }
             var obtainedToken: String? = null
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken != null) {
                     val list = GoogleDriveClient.listFolders(obtainedToken, id)
-                    val currentStack = _folderPathStack.value.toMutableList()
-                    val target = GoogleDriveFolder(id, name)
-                    currentStack.add(target)
-                    _folderPathStack.value = currentStack
-                    _currentFolderId.value = id
-                    _currentFolderName.value = name
-                    _subfolders.value = list
-                    _folderError.value = null
+                    _folderBrowserState.update { current ->
+                        val updatedStack = current.pathStack + GoogleDriveFolder(id, name)
+                        current.copy(
+                            pathStack = updatedStack,
+                            subfolders = list,
+                            asyncState = FolderBrowserAsyncState.Loaded
+                        )
+                    }
                 } else {
-                    _folderError.value = "Failed to retrieve access token"
+                    _folderBrowserState.update {
+                        it.copy(asyncState = FolderBrowserAsyncState.Error("Failed to retrieve access token"))
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _folderError.value = e.localizedMessage ?: e.message
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.Error(e.localizedMessage ?: e.message ?: "Failed to open folder"))
+                }
                 obtainedToken?.let { invalidateCachedToken(context, it) }
-            } finally {
-                _isFolderLoading.value = false
             }
         }
     }
@@ -1081,101 +1203,130 @@ class HomeViewModel(
     fun navigateUp(context: Context) {
         val email = googleEmail.value ?: return
         viewModelScope.launch {
-            _isFolderLoading.value = true
+            if (_folderBrowserState.value.pathStack.size <= 1) return@launch
+            _folderBrowserState.update { it.copy(asyncState = FolderBrowserAsyncState.Loading) }
             var obtainedToken: String? = null
             try {
                 obtainedToken = getAccessToken(context, email)
                 if (obtainedToken != null) {
-                    val currentStack = _folderPathStack.value.toMutableList()
+                    val currentStack = _folderBrowserState.value.pathStack
                     if (currentStack.size > 1) {
-                        currentStack.removeAt(currentStack.size - 1)
-                        val parent = currentStack.last()
-                        _folderPathStack.value = currentStack
-                        _currentFolderId.value = parent.id
-                        _currentFolderName.value = parent.name
+                        val updatedStack = currentStack.dropLast(1)
+                        val parent = updatedStack.last()
                         val list = GoogleDriveClient.listFolders(obtainedToken, parent.id)
-                        _subfolders.value = list
-                        _folderError.value = null
+                        _folderBrowserState.update {
+                            it.copy(
+                                pathStack = updatedStack,
+                                subfolders = list,
+                                asyncState = FolderBrowserAsyncState.Loaded
+                            )
+                        }
+                    } else {
+                        _folderBrowserState.update { it.copy(asyncState = FolderBrowserAsyncState.Loaded) }
                     }
                 } else {
-                    _folderError.value = "Failed to retrieve access token"
+                    _folderBrowserState.update {
+                        it.copy(asyncState = FolderBrowserAsyncState.Error("Failed to retrieve access token"))
+                    }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _folderError.value = e.localizedMessage ?: e.message
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.Error(e.localizedMessage ?: e.message ?: "Failed to navigate up"))
+                }
                 obtainedToken?.let { invalidateCachedToken(context, it) }
-            } finally {
-                _isFolderLoading.value = false
             }
         }
     }
 
     fun createNewSubfolder(context: Context, name: String, onResult: (Boolean) -> Unit) {
-        val email = googleEmail.value ?: return
+        val email = googleEmail.value
+        if (email.isNullOrBlank()) {
+            _folderBrowserState.update {
+                it.copy(asyncState = FolderBrowserAsyncState.Error("Please sign in to Google Drive first."))
+            }
+            onResult(false)
+            return
+        }
         viewModelScope.launch {
-            _isFolderLoading.value = true
+            _folderBrowserState.update { it.copy(asyncState = FolderBrowserAsyncState.Loading) }
             var obtainedToken: String? = null
             try {
                 obtainedToken = getAccessToken(context, email)
+                val targetParentId = _folderBrowserState.value.currentFolderId
                 if (obtainedToken != null) {
-                    val newId = GoogleDriveClient.getOrCreateFolder(obtainedToken, name, _currentFolderId.value)
+                    val newId = GoogleDriveClient.getOrCreateFolder(obtainedToken, name, targetParentId)
                     if (newId != null) {
-                        val list = GoogleDriveClient.listFolders(obtainedToken, _currentFolderId.value)
-                        _subfolders.value = list
-                        _folderError.value = null
+                        val list = GoogleDriveClient.listFolders(obtainedToken, targetParentId)
+                        _folderBrowserState.update {
+                            it.copy(
+                                subfolders = list,
+                                asyncState = FolderBrowserAsyncState.Loaded
+                            )
+                        }
                         onResult(true)
                     } else {
-                        _folderError.value = "Failed to create folder on Google Drive"
+                        _folderBrowserState.update {
+                            it.copy(asyncState = FolderBrowserAsyncState.Error("Failed to create folder on Google Drive"))
+                        }
                         onResult(false)
                     }
                 } else {
-                    _folderError.value = "Failed to retrieve access token"
+                    _folderBrowserState.update {
+                        it.copy(asyncState = FolderBrowserAsyncState.Error("Failed to retrieve access token"))
+                    }
                     onResult(false)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _folderError.value = e.localizedMessage ?: e.message
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.Error(e.localizedMessage ?: e.message ?: "Failed to create folder"))
+                }
                 obtainedToken?.let { invalidateCachedToken(context, it) }
                 onResult(false)
-            } finally {
-                _isFolderLoading.value = false
             }
         }
     }
 
     fun selectCurrentAsDestination() {
+        val current = _folderBrowserState.value
         viewModelScope.launch {
-            settingsRepository.setDriveFolder(_currentFolderId.value, _currentFolderName.value)
+            settingsRepository.setDriveFolder(current.currentFolderId, current.currentFolderName)
         }
     }
 
     // Resolves standard authorization token asynchronously
     fun testDriveApi(context: Context, email: String?) {
         if (email == null) {
-            _folderError.value = "No Google account selected."
+            _folderBrowserState.update {
+                it.copy(asyncState = FolderBrowserAsyncState.DiagnosticNotice("No Google account selected.", isSuccess = false))
+            }
             return
         }
         viewModelScope.launch {
-            _isFolderLoading.value = true
-            _folderError.value = "Testing token fetch..."
+            _folderBrowserState.update {
+                it.copy(asyncState = FolderBrowserAsyncState.Loading)
+            }
             var token: String? = null
             try {
                 token = getAccessToken(context, email)
                 if (token == null) {
-                    _folderError.value = "Failed to fetch token, but no exception was thrown (returned null)."
+                    _folderBrowserState.update {
+                        it.copy(asyncState = FolderBrowserAsyncState.DiagnosticNotice("Failed to fetch token, but no exception was thrown (returned null).", isSuccess = false))
+                    }
                     return@launch
                 }
-                
-                _folderError.value = "Token fetched! Testing API list call..."
+
                 val folders = GoogleDriveClient.listFolders(token, "root")
-                _folderError.value = "SUCCESS! Found ${folders.size} root folders. Token length: ${token.length}"
-                
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.DiagnosticNotice("SUCCESS! Found ${folders.size} root folders. Token length: ${token.length}", isSuccess = true))
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _folderError.value = "Test Failed!\nException Layer 1:\n=== ${e.javaClass.simpleName}: ${e.message}\nCause:\n=== ${e.cause?.javaClass?.simpleName}: ${e.cause?.message}"
+                _folderBrowserState.update {
+                    it.copy(asyncState = FolderBrowserAsyncState.DiagnosticNotice("Test Failed!\nException Layer 1:\n=== ${e.javaClass.simpleName}: ${e.message}\nCause:\n=== ${e.cause?.javaClass?.simpleName}: ${e.cause?.message}", isSuccess = false))
+                }
                 token?.let { invalidateCachedToken(context, it) }
-            } finally {
-                _isFolderLoading.value = false
             }
         }
     }
@@ -1211,10 +1362,9 @@ class HomeViewModel(
     fun processBatchScannedImages(imageUris: List<Uri>, customPagesPerDoc: Int? = null) {
         if (imageUris.isEmpty()) return
         lastBatchScannedUris = imageUris
-        
+
         viewModelScope.launch {
-            _isProcessing.value = true
-            _statusMessage.value = "Processing batch..."
+            postProcessing("Processing batch...")
 
             try {
                 val chunkSize = (customPagesPerDoc ?: batchPagesPerDoc.value).coerceAtLeast(1)
@@ -1222,9 +1372,8 @@ class HomeViewModel(
                     BatchGroup(uris = chunk, isIdCard = false)
                 }
 
-                _isProcessing.value = false
-                _statusMessage.value = ""
-                
+                clearStatusMessage()
+
                 if (showConfirmation.value) {
                     _batchVerificationGroups.value = groupedUris
                 } else {
@@ -1234,7 +1383,7 @@ class HomeViewModel(
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _isProcessing.value = false
+                postStatusMessage("Batch processing failed: ${e.message}", StatusBannerTone.ERROR)
             }
         }
     }
@@ -1265,7 +1414,7 @@ class HomeViewModel(
 
     private suspend fun processMultiScannedImagesInternal(imageUris: List<Uri>, overrideFormat: UploadFormat? = null) {
         if (imageUris.isEmpty()) return
-        _isProcessing.value = true
+        postProcessing("Copying page images...")
         val queueId = java.util.UUID.randomUUID().toString()
         val format = overrideFormat ?: if (imageFormat.value.equals("PDF", true)) UploadFormat.PDF 
                      else if (imageFormat.value.equals("BOTH", true)) UploadFormat.BOTH 
@@ -1282,14 +1431,14 @@ class HomeViewModel(
             _activeQueue.update { it + initialItem }
 
             try {
-                postStatusMessage("Copying page images...", StatusBannerTone.INFO)
+                postProcessing("Copying page images...")
                 updateQueueStatus(queueId, "Copying page images...", QueueItemPhase.PROCESSING)
                 val pageFiles = imageUris.mapIndexed { index, uri ->
                     val file = File(context.cacheDir, "multi_page_${java.util.UUID.randomUUID()}_$index.jpeg")
                     ImageProcessor.fixImageOrientation(context, uri, file)
                 }
 
-                postStatusMessage("Analyzing pages with AI...", StatusBannerTone.INFO)
+                postProcessing("Analyzing pages with AI...")
                 updateQueueStatus(queueId, "Analyzing pages...", QueueItemPhase.PROCESSING)
                 val firstPageFile = pageFiles.first()
                 var personName = "Unknown"
@@ -1356,7 +1505,7 @@ class HomeViewModel(
                     } catch (_: Exception) {}
                 }
 
-                postStatusMessage("Creating preview image...", StatusBannerTone.INFO)
+                postProcessing("Creating preview image...")
                 updateQueueStatus(queueId, "Creating preview image...", QueueItemPhase.PROCESSING)
                 val combinedFile = File(context.cacheDir, "combined_multi_${java.util.UUID.randomUUID()}.jpeg")
                 val resultFile = if (isId) {
@@ -1368,16 +1517,27 @@ class HomeViewModel(
                 if (resultFile == null) {
                     postStatusMessage("Failed to combine images", StatusBannerTone.ERROR)
                     updateQueueStatus(queueId, "Failed: Combined empty", QueueItemPhase.FAILED)
-                    _isProcessing.value = false
                     return
                 }
 
                 val targetKb = targetSizeKb.value
-                postStatusMessage("Compressing preview...", StatusBannerTone.INFO)
+                postProcessing("Compressing preview...")
                 updateQueueStatus(queueId, "Compressing preview...", QueueItemPhase.PROCESSING)
                 val compressedPreviewFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
 
                 try { resultFile.delete() } catch (e: Exception) {}
+
+                // When a multi-page scan is NOT a 1-sheet ID card pair (so it has 2+ separate pages),
+                // ensure the default format is at least PDF (or BOTH) rather than single-image JPEG.
+                val effectiveFormat = if (!isId && pageFiles.size > 1 && format == UploadFormat.JPEG) {
+                    UploadFormat.PDF
+                } else {
+                    format
+                }
+
+                _activeQueue.update { it.map { item ->
+                    if (item.id == queueId) item.copy(format = effectiveFormat) else item
+                } }
 
                 if (isId) {
                     pageFiles.forEach { file ->
@@ -1393,13 +1553,13 @@ class HomeViewModel(
                         compressedFile = compressedPreviewFile,
                         initialPersonName = personName,
                         initialDocumentType = documentType,
-                        pageFiles = if (!isId) pageFiles else null
+                        pageFiles = if (!isId) pageFiles else null,
+                        initialFormat = effectiveFormat
                     )
                     _pendingDocuments.update { it + item }
                 } else {
                     clearStatusMessage()
                     updateQueueStatus(queueId, "Saving automatically...", QueueItemPhase.PROCESSING)
-                    _isProcessing.value = false
 
                     viewModelScope.launch {
                         executeBackgroundUpload(
@@ -1408,18 +1568,23 @@ class HomeViewModel(
                             compressedPreviewFile,
                             personName,
                             documentType,
-                            format,
+                            effectiveFormat,
                             pageFiles = if (!isId) pageFiles else null
                         )
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                _isProcessing.value = false
                 postStatusMessage("Failed: ${e.message}", StatusBannerTone.ERROR)
                 updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             }
         }
+
+    private fun imageExtensionForCodec(codec: String): String =
+        if (codec.equals("WEBP", ignoreCase = true)) "webp" else "jpeg"
+
+    private fun imageMimeForExtension(ext: String): String =
+        if (ext.equals("webp", ignoreCase = true)) "image/webp" else "image/jpeg"
 
     fun updateAndUploadDocument(
         context: Context,
@@ -1430,7 +1595,7 @@ class HomeViewModel(
         newPageUris: List<Uri>? = null
     ) {
         viewModelScope.launch {
-            _isProcessing.value = true
+            postProcessing("Updating document...")
             val queueId = java.util.UUID.randomUUID().toString()
             
             val initialItem = QueueItem(
@@ -1449,7 +1614,6 @@ class HomeViewModel(
                 if (existingDoc == null) {
                     postStatusMessage("Error: Document not found in database.", StatusBannerTone.ERROR)
                     updateQueueStatus(queueId, "Failed: Not found", QueueItemPhase.FAILED)
-                    _isProcessing.value = false
                     return@launch
                 }
 
@@ -1469,7 +1633,14 @@ class HomeViewModel(
                     "${safeDocumentType}_${safePersonName}_$existingSuffix"
                 }
 
-                val finalJpgName = "$newBaseName.jpeg"
+                val activeImgExt = if (newPageUris != null && newPageUris.isNotEmpty()) {
+                    imageExtensionForCodec(compressionCodec.value)
+                } else if (!oldFileName.endsWith(".pdf", ignoreCase = true)) {
+                    oldFileName.substringAfterLast(".", "jpeg").lowercase().let { if (it == "webp") "webp" else "jpeg" }
+                } else {
+                    imageExtensionForCodec(compressionCodec.value)
+                }
+                val finalJpgName = "$newBaseName.$activeImgExt"
                 val finalPdfName = "$newBaseName.pdf"
                 val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
 
@@ -1480,7 +1651,7 @@ class HomeViewModel(
                 var isId = false
 
                 if (newPageUris != null && newPageUris.isNotEmpty()) {
-                    postStatusMessage("Processing new page scans...", StatusBannerTone.INFO)
+                    postProcessing("Processing new page scans...")
                     updateQueueStatus(queueId, "Processing new scans...", QueueItemPhase.PROCESSING)
                     
                     tempPageFiles = newPageUris.mapIndexed { index, uri ->
@@ -1492,7 +1663,24 @@ class HomeViewModel(
                     // A4 Sheet Canvas: strictly for 2 compact ID card pages (Front + Back) when the A4 toggle is enabled
                     // AND both images fit on a single A4 sheet without portrait overflow or clipping.
                     val editPagePaths = tempPageFiles.map { it.absolutePath }
-                    isId = newPageUris.size == 2 && useA4Format.value && ImageProcessor.canPairFitOnSingleA4IdSheet(editPagePaths)
+                    val nonIdFullPageTypes = setOf("Birth Certificate", "Death Certificate", "Marksheet")
+                    isId = newPageUris.size == 2 &&
+                        useA4Format.value &&
+                        checkedDocumentType !in nonIdFullPageTypes &&
+                        ImageProcessor.canPairFitOnSingleA4IdSheet(editPagePaths)
+
+                    if (isId && tempPageFiles.size == 2) {
+                        try {
+                            val firstType = sanitizeDocumentType(analyzeDocumentLocally(tempPageFiles[0]).documentType)
+                            val secondType = sanitizeDocumentType(analyzeDocumentLocally(tempPageFiles[1]).documentType)
+                            if (firstType in nonIdFullPageTypes || secondType in nonIdFullPageTypes) {
+                                isId = false
+                            } else if (firstType != "Document" && secondType != "Document" && firstType != secondType) {
+                                isId = false
+                            }
+                        } catch (_: Exception) {}
+                    }
+
                     val resultFile = if (isId) {
                         ImageProcessor.combineImagesToA4(editPagePaths, combinedFile)
                     } else {
@@ -1502,15 +1690,18 @@ class HomeViewModel(
                         tempPageFiles.forEach { try { it.delete() } catch (_: Exception) {} }
                         postStatusMessage("Failed to combine images.", StatusBannerTone.ERROR)
                         updateQueueStatus(queueId, "Failed: Combined empty", QueueItemPhase.FAILED)
-                        _isProcessing.value = false
                         return@launch
+                    }
+
+                    if (isId) {
+                        tempPageFiles.forEach { try { it.delete() } catch (_: Exception) {} }
                     }
 
                     val targetKb = targetSizeKb.value
                     val compressedFile = ImageProcessor.compressImage(resultFile, targetKb, compressionCodec.value, autoEnhance = autoEnhanceEnabled.value)
                     try { resultFile.delete() } catch (e: Exception) {}
 
-                    // Always write the newly combined image to a .jpeg file and clear any old PDF so executeBackgroundUpload generates a fresh PDF
+                    // Always write the newly combined image file and clear any old PDF so executeBackgroundUpload generates a fresh PDF
                     compressedFile.copyTo(targetLocalJpg, overwrite = true)
                     try { compressedFile.delete() } catch (e: Exception) {}
                     if (targetLocalPdf.exists()) {
@@ -1538,7 +1729,6 @@ class HomeViewModel(
                 clearStatusMessage()
                 updateQueueStatus(queueId, "Syncing changes...", QueueItemPhase.PROCESSING)
 
-                _isProcessing.value = false
                 viewModelScope.launch {
                     executeBackgroundUpload(
                         context = context,
@@ -1555,7 +1745,6 @@ class HomeViewModel(
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                _isProcessing.value = false
                 postStatusMessage("Update failed: ${e.message}", StatusBannerTone.ERROR)
                 updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             }
@@ -1602,8 +1791,7 @@ class HomeViewModel(
         } }
 
         viewModelScope.launch {
-            _isProcessing.value = true
-            postStatusMessage("Requesting Google authorization...", StatusBannerTone.INFO)
+            postProcessing("Requesting Google authorization...")
             
             val email = settingsRepository.googleEmail.first()
             val folderId = settingsRepository.driveFolderId.first()
@@ -1616,13 +1804,16 @@ class HomeViewModel(
             } else {
                 "${safeDocumentType}_${safePersonName}_$suffixId"
             }
-            val finalJpgName = "${finalNameBase}.jpeg"
+            val activeImgExt = imageExtensionForCodec(compressionCodec.value)
+            val activeImgMime = imageMimeForExtension(activeImgExt)
+            val finalJpgName = "${finalNameBase}.$activeImgExt"
             val finalPdfName = "${finalNameBase}.pdf"
             val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
             
-            // Re-compress to true JPEG matching activeTargetSize (e.g. 90 KB)
-            val sourceImage = if (pending.pageFiles != null && pending.pageFiles.size == 1 && pending.pageFiles.first().exists()) {
-                pending.pageFiles.first()
+            // Re-compress using active compressionCodec and autoEnhance when source is the raw single page
+            val isFromRawSinglePage = pending.pageFiles != null && pending.pageFiles.size == 1 && pending.pageFiles.first().exists()
+            val sourceImage = if (isFromRawSinglePage) {
+                pending.pageFiles!!.first()
             } else {
                 pending.compressedFile
             }
@@ -1633,8 +1824,8 @@ class HomeViewModel(
                     val recompressed = ImageProcessor.compressImage(
                         file = sourceImage,
                         targetSizeKb = activeTargetSize,
-                        format = "JPEG",
-                        autoEnhance = false
+                        format = compressionCodec.value,
+                        autoEnhance = if (isFromRawSinglePage) autoEnhanceEnabled.value else false
                     )
                     recompressed.copyTo(localCopy, overwrite = true)
                     try { recompressed.delete() } catch (e: Exception) {}
@@ -1644,7 +1835,7 @@ class HomeViewModel(
 
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                     if (localCopy.exists()) {
-                        ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
+                        ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, activeImgMime)
                     }
                 }
             } catch (ecop: Exception) {
@@ -1658,7 +1849,7 @@ class HomeViewModel(
             val localPdf = File(context.filesDir, finalPdfName)
             if (format == UploadFormat.PDF || format == UploadFormat.BOTH) {
                 try {
-                    postStatusMessage("Generating and structuring PDF...", StatusBannerTone.INFO)
+                    postProcessing("Generating and structuring PDF...")
                     updateQueueStatus(queueId, "Generating structured PDF...", QueueItemPhase.PROCESSING)
                     if (pending.pageFiles != null && pending.pageFiles.isNotEmpty()) {
                         ImageProcessor.convertToMultiPagePdf(pending.pageFiles, localPdf, activeTargetSize, autoEnhance = autoEnhanceEnabled.value)
@@ -1702,7 +1893,6 @@ class HomeViewModel(
             if (email.isNullOrEmpty()) {
                 postStatusMessage("Error: Please sign in to sync with Drive! Saved locally.", StatusBannerTone.WARNING)
                 updateQueueStatus(queueId, "Saved locally (Sign-In required)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
-                _isProcessing.value = false
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
                 pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
                 fetchDriveFiles(context)
@@ -1715,7 +1905,6 @@ class HomeViewModel(
                 if (obtainedToken == null) {
                     postStatusMessage("Failed to retrieve Google token. Saved locally.", StatusBannerTone.WARNING)
                     updateQueueStatus(queueId, "Saved locally (Token failed)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
-                    _isProcessing.value = false
                     try { pending.compressedFile.delete() } catch (el: Exception) {}
                     pending.pageFiles?.forEach { file -> try { file.delete() } catch (e: Exception) {} }
                     fetchDriveFiles(context)
@@ -1725,7 +1914,7 @@ class HomeViewModel(
                 var uploadParentId = folderId
                 val subFolderName = targetSubfolder.value.trim()
                 if (subFolderName.isNotEmpty()) {
-                    postStatusMessage("Creating/finding target folder: $subFolderName...", StatusBannerTone.INFO)
+                    postProcessing("Creating/finding target folder: $subFolderName...")
                     updateQueueStatus(queueId, "Finding target folder: $subFolderName...", QueueItemPhase.PROCESSING)
                     uploadParentId = getCachedOrFetchSubFolder(obtainedToken, subFolderName, folderId)
                 }
@@ -1734,7 +1923,7 @@ class HomeViewModel(
                 var isPdfUploaded = false
 
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
-                    postStatusMessage("Uploading compressed image to Google Drive...", StatusBannerTone.INFO)
+                    postProcessing("Uploading compressed image to Google Drive...")
                     updateQueueStatus(queueId, "Uploading image standard file...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
@@ -1745,7 +1934,7 @@ class HomeViewModel(
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
                             file = localCopy,
-                            mimeType = "image/jpeg",
+                            mimeType = activeImgMime,
                             fileName = finalJpgName,
                             parentId = uploadParentId
                         )
@@ -1758,7 +1947,7 @@ class HomeViewModel(
                     if (!localPdf.exists()) {
                         throw java.io.FileNotFoundException("PDF file not found: ${localPdf.absolutePath}")
                     }
-                    postStatusMessage("Uploading structured PDF to Google Drive...", StatusBannerTone.INFO)
+                    postProcessing("Uploading structured PDF to Google Drive...")
                     updateQueueStatus(queueId, "Uploading PDF to Drive...", QueueItemPhase.PROCESSING)
                     val (uploaded, freshToken) = uploadFileWithAuthRetry(
                         context = context,
@@ -1824,7 +2013,7 @@ class HomeViewModel(
                 
                 viewModelScope.launch {
                     kotlinx.coroutines.delay(3000)
-                    if (_statusMessage.value == msg) {
+                    if (statusMessage.value == msg) {
                         clearStatusMessage()
                     }
                 }
@@ -1837,12 +2026,12 @@ class HomeViewModel(
                 
                 viewModelScope.launch {
                     kotlinx.coroutines.delay(4000)
-                    if (_statusMessage.value == errMsg) {
+                    if (statusMessage.value == errMsg) {
                         clearStatusMessage()
                     }
                 }
             } finally {
-                _isProcessing.value = false
+                clearProcessingIfActive()
                 try { pending.compressedFile.delete() } catch (el: Exception) {}
                 pending.pageFiles?.forEach { file ->
                     try { file.delete() } catch (e: Exception) {}
@@ -1880,8 +2069,9 @@ class HomeViewModel(
                 val refOldName = previousFileName ?: existingDoc?.fileName
                 if (refOldName != null) {
                     val refBase = refOldName.substringBeforeLast(".")
+                    val refExt = refOldName.substringAfterLast(".", "").lowercase()
                     oldPdfName = "$refBase.pdf"
-                    oldJpgName = "$refBase.jpeg"
+                    oldJpgName = if (refExt == "webp") "$refBase.webp" else "$refBase.jpeg"
                 }
             }
 
@@ -1899,7 +2089,14 @@ class HomeViewModel(
                     "${safeDocumentType}_${safePersonName}_$suffixId"
                 }
             }
-            finalJpgName = "${finalNameBase}.jpeg"
+            val activeImgExt = when {
+                isRetry && existingDoc != null && !existingDoc.fileName.endsWith(".pdf", ignoreCase = true) &&
+                    (pageFiles == null || pageFiles.isEmpty()) ->
+                    existingDoc.fileName.substringAfterLast(".", "jpeg").lowercase().let { if (it == "webp") "webp" else "jpeg" }
+                else -> imageExtensionForCodec(compressionCodec.value)
+            }
+            val activeImgMime = imageMimeForExtension(activeImgExt)
+            finalJpgName = "${finalNameBase}.$activeImgExt"
             finalPdfName = "${finalNameBase}.pdf"
 
             val safeLocalJpg = File(context.filesDir, finalJpgName)
@@ -1908,8 +2105,9 @@ class HomeViewModel(
             // 1. Prepare safeLocalJpg if required
             if (!safeLocalJpg.exists() || safeLocalJpg.length() == 0L) {
                 try {
-                    val sourceImage = if (pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()) {
-                        pageFiles.first()
+                    val isFromRawSinglePage = pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()
+                    val sourceImage = if (isFromRawSinglePage) {
+                        pageFiles!!.first()
                     } else if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
                         ImageProcessor.getOrCreateThumbnailFile(context, compressedFile.absolutePath) ?: compressedFile
                     } else {
@@ -1919,8 +2117,8 @@ class HomeViewModel(
                         val recompressed = ImageProcessor.compressImage(
                             file = sourceImage,
                             targetSizeKb = activeTargetSize,
-                            format = "JPEG",
-                            autoEnhance = false
+                            format = compressionCodec.value,
+                            autoEnhance = if (isFromRawSinglePage) autoEnhanceEnabled.value else false
                         )
                         recompressed.copyTo(safeLocalJpg, overwrite = true)
                         try { recompressed.delete() } catch (e: Exception) {}
@@ -1930,7 +2128,7 @@ class HomeViewModel(
 
                     if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                         if (safeLocalJpg.exists()) {
-                            ImageProcessor.exportToPublicDocuments(context, safeLocalJpg, finalJpgName, "image/jpeg")
+                            ImageProcessor.exportToPublicDocuments(context, safeLocalJpg, finalJpgName, activeImgMime)
                         }
                     }
                 } catch (ecop: Exception) {
@@ -1967,9 +2165,32 @@ class HomeViewModel(
             val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
             val primaryLocalFile = if ((format == UploadFormat.PDF || format == UploadFormat.BOTH) && safeLocalPdf.exists()) safeLocalPdf else safeLocalJpg
 
-            // Insert or Update local DB with the actual matching file path
+            // Clean up obsolete previous local files only after confirming the replacement exists
+            if (isRetry && existingDoc != null && primaryLocalFile.exists() && primaryLocalFile.length() > 0L) {
+                val previousFile = File(existingDoc.localFilePath)
+                if (previousFile.exists() &&
+                    previousFile.absolutePath != safeLocalJpg.absolutePath &&
+                    previousFile.absolutePath != safeLocalPdf.absolutePath) {
+                    try { previousFile.delete() } catch (_: Exception) {}
+                }
+            }
+
+            // Insert or Update local DB immediately with the actual matching file path
+            // so even offline or unauthenticated edits reflect the generated PDF/JPEG path immediately
             val insertId = try {
                 if (existingDocId != null) {
+                    if (existingDoc != null && primaryLocalFile.exists()) {
+                        database.documentDao().updateDocument(
+                            existingDoc.copy(
+                                fileName = dbFileName,
+                                personName = checkedPersonName,
+                                documentType = checkedDocumentType,
+                                localFilePath = primaryLocalFile.absolutePath,
+                                isUploaded = false,
+                                timestamp = System.currentTimeMillis()
+                            )
+                        )
+                    }
                     existingDocId.toLong()
                 } else {
                     val newId = database.documentDao().insertDocument(
@@ -2040,7 +2261,7 @@ class HomeViewModel(
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
                             file = safeLocalJpg,
-                            mimeType = "image/jpeg",
+                            mimeType = activeImgMime,
                             fileName = finalJpgName,
                             parentId = uploadParentId,
                             oldFileName = oldJpgName
@@ -2121,9 +2342,10 @@ class HomeViewModel(
         } finally {
             if (existingDocId == null) {
                 try { compressedFile.delete() } catch (ex: Exception) {}
-                pageFiles?.forEach { file ->
-                    try { file.delete() } catch (ex: Exception) {}
-                }
+            }
+            // Always clean up temporary pageFiles in cacheDir (both for new scans and edited documents)
+            pageFiles?.forEach { file ->
+                try { file.delete() } catch (ex: Exception) {}
             }
             updatePublicFolderSize()
         }
@@ -2236,9 +2458,12 @@ class HomeViewModel(
                         } else {
                             val baseName = doc.fileName.substringBeforeLast(".")
                             val fallbackJpg = File(context.filesDir, "$baseName.jpeg")
+                            val fallbackWebp = File(context.filesDir, "$baseName.webp")
                             val fallbackPdf = File(context.filesDir, "$baseName.pdf")
                             if (fallbackPdf.exists()) {
                                 file = fallbackPdf
+                            } else if (fallbackWebp.exists()) {
+                                file = fallbackWebp
                             } else if (fallbackJpg.exists()) {
                                 file = fallbackJpg
                             }
@@ -2306,8 +2531,7 @@ class HomeViewModel(
                 if (selectedDocs.isEmpty()) return@launch
                 
                 val cleanDisplayTitle = fileName.trim().removeSuffix(".pdf").removeSuffix(".PDF").trim().ifEmpty { "Merged_Document" }
-                postStatusMessage("Merging ${selectedDocs.size} documents into PDF...", StatusBannerTone.INFO)
-                _isProcessing.value = true
+                postProcessing("Merging ${selectedDocs.size} documents into PDF...")
                 
                 _activeQueue.update { it + QueueItem(
                     id = queueId,
@@ -2334,7 +2558,6 @@ class HomeViewModel(
                 
                 if (filesToMerge.isEmpty()) {
                     postStatusMessage("No valid documents selected to merge.", StatusBannerTone.ERROR)
-                    _isProcessing.value = false
                     updateQueueStatus(queueId, "Failed: No documents", QueueItemPhase.FAILED)
                     try { tempDir.deleteRecursively() } catch (e: Exception) {}
                     return@launch
@@ -2423,7 +2646,7 @@ class HomeViewModel(
                 postStatusMessage("Merge failed: ${e.message}", StatusBannerTone.ERROR)
                 updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
             } finally {
-                _isProcessing.value = false
+                clearProcessingIfActive()
             }
         }
     }
@@ -3317,6 +3540,8 @@ class HomeViewModel(
                         val basePath = doc.localFilePath.substringBeforeLast(".")
                         val siblingJpg = File("$basePath.jpeg")
                         if (siblingJpg.exists()) siblingJpg.delete()
+                        val siblingWebp = File("$basePath.webp")
+                        if (siblingWebp.exists()) siblingWebp.delete()
                         val siblingPdf = File("$basePath.pdf")
                         if (siblingPdf.exists()) siblingPdf.delete()
                     } catch (e: Exception) {

@@ -1140,6 +1140,10 @@ object ImageProcessor {
             if (siblingJpg.exists() && siblingJpg.length() > 0L) {
                 return@withContext siblingJpg
             }
+            val siblingWebp = File("$basePath.webp")
+            if (siblingWebp.exists() && siblingWebp.length() > 0L) {
+                return@withContext siblingWebp
+            }
 
             // 2. Check cached PDF thumbnail in cacheDir
             val thumbDir = File(context.cacheDir, "pdf_thumbs").apply { if (!exists()) mkdirs() }
