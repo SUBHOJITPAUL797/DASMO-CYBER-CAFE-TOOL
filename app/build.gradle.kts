@@ -103,12 +103,12 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
+  // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
-  implementation(libs.moshi.kotlin)
+  // implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
   implementation(libs.play.services.mlkit.document.scanner)
   implementation(libs.play.services.mlkit.text.recognition)
@@ -135,5 +135,32 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
+  // "ksp"(libs.moshi.kotlin.codegen)
+}
+
+// Work around upstream KSP2 2.3.x race where BinaryFileTypeDecompilers posts an async
+// SwingUtilities.invokeLater callback onto AWT-EventQueue-0 that fires after KSP disposes
+// its shaded IntelliJ ApplicationManager during task teardown.
+tasks.matching { it.name.startsWith("ksp") }.configureEach {
+  doFirst {
+    val guardKey = "dasmo.ksp.awt.teardown.guard.installed"
+    if (System.getProperty(guardKey) != "true") {
+      val previousDefault = Thread.getDefaultUncaughtExceptionHandler()
+      Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        val isHarmlessKspTeardownNpe =
+          thread.name.startsWith("AWT-EventQueue") &&
+            throwable is NullPointerException &&
+            (throwable.message?.contains("ksp.com.intellij.openapi.application.ApplicationManager.getApplication()") == true ||
+              throwable.stackTrace.any { it.className.startsWith("ksp.com.intellij.openapi.fileTypes.BinaryFileTypeDecompilers") })
+        if (!isHarmlessKspTeardownNpe) {
+          if (previousDefault != null) {
+            previousDefault.uncaughtException(thread, throwable)
+          } else {
+            thread.threadGroup?.uncaughtException(thread, throwable)
+          }
+        }
+      }
+      System.setProperty(guardKey, "true")
+    }
+  }
 }
