@@ -1580,12 +1580,6 @@ class HomeViewModel(
             }
         }
 
-    private fun imageExtensionForCodec(codec: String): String =
-        if (codec.equals("WEBP", ignoreCase = true)) "webp" else "jpeg"
-
-    private fun imageMimeForExtension(ext: String): String =
-        if (ext.equals("webp", ignoreCase = true)) "image/webp" else "image/jpeg"
-
     fun updateAndUploadDocument(
         context: Context,
         docId: Int,
@@ -1633,14 +1627,7 @@ class HomeViewModel(
                     "${safeDocumentType}_${safePersonName}_$existingSuffix"
                 }
 
-                val activeImgExt = if (newPageUris != null && newPageUris.isNotEmpty()) {
-                    imageExtensionForCodec(compressionCodec.value)
-                } else if (!oldFileName.endsWith(".pdf", ignoreCase = true)) {
-                    oldFileName.substringAfterLast(".", "jpeg").lowercase().let { if (it == "webp") "webp" else "jpeg" }
-                } else {
-                    imageExtensionForCodec(compressionCodec.value)
-                }
-                val finalJpgName = "$newBaseName.$activeImgExt"
+                val finalJpgName = "$newBaseName.jpeg"
                 val finalPdfName = "$newBaseName.pdf"
                 val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
 
@@ -1804,9 +1791,7 @@ class HomeViewModel(
             } else {
                 "${safeDocumentType}_${safePersonName}_$suffixId"
             }
-            val activeImgExt = imageExtensionForCodec(compressionCodec.value)
-            val activeImgMime = imageMimeForExtension(activeImgExt)
-            val finalJpgName = "${finalNameBase}.$activeImgExt"
+            val finalJpgName = "${finalNameBase}.jpeg"
             val finalPdfName = "${finalNameBase}.pdf"
             val dbFileName = if (format == UploadFormat.PDF || format == UploadFormat.BOTH) finalPdfName else finalJpgName
             
@@ -1835,7 +1820,7 @@ class HomeViewModel(
 
                 if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                     if (localCopy.exists()) {
-                        ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, activeImgMime)
+                        ImageProcessor.exportToPublicDocuments(context, localCopy, finalJpgName, "image/jpeg")
                     }
                 }
             } catch (ecop: Exception) {
@@ -1934,7 +1919,7 @@ class HomeViewModel(
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
                             file = localCopy,
-                            mimeType = activeImgMime,
+                            mimeType = "image/jpeg",
                             fileName = finalJpgName,
                             parentId = uploadParentId
                         )
@@ -2089,14 +2074,7 @@ class HomeViewModel(
                     "${safeDocumentType}_${safePersonName}_$suffixId"
                 }
             }
-            val activeImgExt = when {
-                isRetry && existingDoc != null && !existingDoc.fileName.endsWith(".pdf", ignoreCase = true) &&
-                    (pageFiles == null || pageFiles.isEmpty()) ->
-                    existingDoc.fileName.substringAfterLast(".", "jpeg").lowercase().let { if (it == "webp") "webp" else "jpeg" }
-                else -> imageExtensionForCodec(compressionCodec.value)
-            }
-            val activeImgMime = imageMimeForExtension(activeImgExt)
-            finalJpgName = "${finalNameBase}.$activeImgExt"
+            finalJpgName = "${finalNameBase}.jpeg"
             finalPdfName = "${finalNameBase}.pdf"
 
             val safeLocalJpg = File(context.filesDir, finalJpgName)
@@ -2128,7 +2106,7 @@ class HomeViewModel(
 
                     if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
                         if (safeLocalJpg.exists()) {
-                            ImageProcessor.exportToPublicDocuments(context, safeLocalJpg, finalJpgName, activeImgMime)
+                            ImageProcessor.exportToPublicDocuments(context, safeLocalJpg, finalJpgName, "image/jpeg")
                         }
                     }
                 } catch (ecop: Exception) {
@@ -2261,7 +2239,7 @@ class HomeViewModel(
                         GoogleDriveClient.uploadFile(
                             accessToken = token,
                             file = safeLocalJpg,
-                            mimeType = activeImgMime,
+                            mimeType = "image/jpeg",
                             fileName = finalJpgName,
                             parentId = uploadParentId,
                             oldFileName = oldJpgName

@@ -4223,12 +4223,6 @@ fun MainScreen(
         var tempDocumentType by remember(doc) { mutableStateOf(doc.initialDocumentType) }
         var tempUploadFormat by remember(doc) { mutableStateOf(doc.initialFormat) }
         var tempTargetSize by remember(doc) { mutableStateOf(targetSizeKb.toString()) }
-        val activeImgExtLabel = remember(compressionCodec) {
-            if (compressionCodec.equals("WEBP", ignoreCase = true)) "WEBP" else "JPEG"
-        }
-        val activeImgExtSuffix = remember(compressionCodec) {
-            if (compressionCodec.equals("WEBP", ignoreCase = true)) ".webp" else ".jpeg"
-        }
 
         val presets = remember { listOf("Aadhaar Card", "PAN Card", "Voter ID", "Passport", "Driving License", "Marksheet", "Ration Card") }
 
@@ -4416,7 +4410,7 @@ fun MainScreen(
                                 selected = tempUploadFormat == UploadFormat.JPEG,
                                 onClick = { tempUploadFormat = UploadFormat.JPEG }
                             )
-                            Text(activeImgExtLabel, style = MaterialTheme.typography.bodySmall)
+                            Text("JPEG", style = MaterialTheme.typography.bodySmall)
                         }
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -4582,8 +4576,8 @@ fun MainScreen(
                             }
                             val fileExt = when (tempUploadFormat) {
                                 UploadFormat.PDF -> ".pdf"
-                                UploadFormat.JPEG -> activeImgExtSuffix
-                                UploadFormat.BOTH -> "$activeImgExtSuffix + .pdf"
+                                UploadFormat.JPEG -> ".jpeg"
+                                UploadFormat.BOTH -> ".jpeg + .pdf"
                             }
                             val parsedSize = tempTargetSize.toIntOrNull()?.coerceIn(10, 10000) ?: targetSizeKb
                             Text(
@@ -5200,9 +5194,6 @@ fun MainScreen(
     if (activeEditModal != null) {
         val currentEditDialog = activeEditModal.editState
         val doc = currentEditDialog.doc
-        val editImgExtLabel = remember(compressionCodec) {
-            if (compressionCodec.equals("WEBP", ignoreCase = true)) "WEBP" else "JPEG"
-        }
         AlertDialog(
             onDismissRequest = { activeOverlayModal = DashboardOverlayModal.None },
             title = {
@@ -5256,7 +5247,6 @@ fun MainScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         com.example.ui.UploadFormat.values().forEach { format ->
-                            val formatLabel = if (format == UploadFormat.JPEG) editImgExtLabel else format.name
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
@@ -5285,7 +5275,7 @@ fun MainScreen(
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                                 Text(
-                                    text = formatLabel,
+                                    text = format.name,
                                     style = MaterialTheme.typography.bodySmall,
                                     fontWeight = FontWeight.Bold,
                                     color = if (currentEditDialog.format == format) MaterialTheme.colorScheme.onPrimaryContainer
