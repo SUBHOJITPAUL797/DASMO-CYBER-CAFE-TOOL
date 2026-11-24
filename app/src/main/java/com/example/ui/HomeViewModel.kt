@@ -3612,6 +3612,134 @@ class HomeViewModel(
             e.printStackTrace()
         }
     }
+
+    fun saveAndUploadPassportPhoto(
+        context: Context,
+        sourceTempFile: File,
+        customClientName: String,
+        isPrintSheet: Boolean,
+        targetFolderId: String?,
+        targetFolderName: String,
+        uploadToDrive: Boolean,
+        onResult: (Boolean, String, Boolean) -> Unit
+    ) {
+        viewModelScope.launch {
+            val cleanClient = customClientName.trim()
+                .replace(Regex("[^a-zA-Z0-9_\\- ]"), "")
+                .replace(Regex("\\s+"), "_")
+                .ifEmpty { "Client_${System.currentTimeMillis() % 10000}" }
+            val docTypeLabel = if (isPrintSheet) "Passport_8Sheet" else "Passport_Photo"
+            val suffix = java.util.UUID.randomUUID().toString().take(4)
+            val finalFileName = if (nameBeforeType.value) {
+                "${cleanClient}_${docTypeLabel}_$suffix.jpeg"
+            } else {
+                "${docTypeLabel}_${cleanClient}_$suffix.jpeg"
+            }
+
+            val queueId = java.util.UUID.randomUUID().toString()
+            val humanDocType = if (isPrintSheet) "Passport 4×6 Sheet" else "Passport Photo"
+
+            if (uploadToDrive) {
+                _activeQueue.update {
+                    it + QueueItem(
+                        id = queueId,
+                        personName = cleanClient.replace("_", " "),
+                        documentType = humanDocType,
+                        status = "Preparing passport JPEG...",
+                        phase = QueueItemPhase.PROCESSING,
+                        format = UploadFormat.JPEG
+                    )
+                }
+            }
+
+            try {
+                val persistentFile = withContext(Dispatchers.IO) {
+                    val dest = File(context.filesDir, finalFileName)
+                    sourceTempFile.copyTo(dest, overwrite = true)
+                    ImageProcessor.exportToPublicDocuments(context, dest, finalFileName, "image/jpeg")
+                    try { sourceTempFile.delete() } catch (_: Exception) {}
+                    dest
+                }
+
+                var isUploadedToDrive = false
+                val email = googleEmail.value
+                val effectiveFolderId = targetFolderId?.ifBlank { "root" } ?: "root"
+                val effectiveFolderName = targetFolderName.trim().ifEmpty { "My Drive" }
+
+                if (uploadToDrive && !email.isNullOrBlank()) {
+                    postProcessing("Uploading $humanDocType to Drive ($effectiveFolderName)...")
+                    updateQueueStatus(queueId, "Uploading to $effectiveFolderName...", QueueItemPhase.PROCESSING)
+
+                    val (uploaded, _) = uploadFileWithAuthRetry(
+                        context = context,
+                        email = email,
+                        initialToken = null,
+                        onStatusUpdate = { statusText ->
+                            updateQueueStatus(queueId, statusText, QueueItemPhase.PROCESSING)
+                        }
+                    ) { token ->
+                        GoogleDriveClient.uploadFile(
+                            accessToken = token,
+                            file = persistentFile,
+                            mimeType = "image/jpeg",
+                            fileName = finalFileName,
+                            parentId = effectiveFolderId
+                        )
+                    }
+                    isUploadedToDrive = uploaded
+                }
+
+                val builtDrivePath = if (isUploadedToDrive) "My Drive/$effectiveFolderName" else null
+                val entity = DocumentEntity(
+                    fileName = finalFileName,
+                    personName = cleanClient.replace("_", " "),
+                    documentType = humanDocType,
+                    localFilePath = persistentFile.absolutePath,
+                    timestamp = System.currentTimeMillis(),
+                    isUploaded = isUploadedToDrive,
+                    drivePath = builtDrivePath
+                )
+                val insertedId = withContext(Dispatchers.IO) {
+                    database.documentDao().insertDocument(entity)
+                }
+                if (insertedId != -1L) {
+                    incrementUserScannedCount()
+                    if (uploadToDrive) {
+                        updateQueueDocId(queueId, insertedId.toInt())
+                    }
+                }
+
+                updatePublicFolderSize()
+
+                if (uploadToDrive) {
+                    if (isUploadedToDrive) {
+                        updateQueueStatus(queueId, "Uploaded to $effectiveFolderName", QueueItemPhase.COMPLETED)
+                        postStatusMessage("Uploaded $finalFileName to Drive ($effectiveFolderName)", StatusBannerTone.SUCCESS)
+                        fetchDriveFiles(context)
+                        onResult(true, "Uploaded to Google Drive ($effectiveFolderName) & saved to device ($finalFileName)", true)
+                    } else if (email.isNullOrBlank()) {
+                        updateQueueStatus(queueId, "Saved locally (Sign in to Drive)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
+                        postStatusMessage("Saved locally. Sign in with Google to upload to Drive.", StatusBannerTone.WARNING)
+                        onResult(false, "Saved to phone ($finalFileName), but Google Drive account is not signed in.", false)
+                    } else {
+                        updateQueueStatus(queueId, "Saved locally (Drive upload failed)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
+                        postStatusMessage("Saved locally; Drive upload failed (can retry from Captures).", StatusBannerTone.WARNING)
+                        onResult(false, "Saved to phone ($finalFileName). Drive upload failed — you can retry from Captures.", false)
+                    }
+                } else {
+                    postStatusMessage("Saved $finalFileName to Documents/Dasmo Scan", StatusBannerTone.SUCCESS)
+                    onResult(true, "Saved to Documents/Dasmo Scan/$finalFileName", false)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                if (uploadToDrive) {
+                    updateQueueStatus(queueId, "Failed: ${e.message}", QueueItemPhase.FAILED)
+                }
+                postStatusMessage("Passport save failed: ${e.message}", StatusBannerTone.ERROR)
+                onResult(false, "Failed: ${e.localizedMessage ?: e.message ?: "Unknown error"}", false)
+            }
+        }
+    }
 }
 
 

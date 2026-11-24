@@ -189,7 +189,13 @@ sealed interface CustomRegroupModalState {
 
 enum class FolderPickerPurpose {
     DEFAULT_SYNC_FOLDER,
-    MERGE_DESTINATION_FOLDER
+    MERGE_DESTINATION_FOLDER,
+    PASSPORT_DESTINATION_FOLDER
+}
+
+sealed interface PassportDriveSelection {
+    data object DefaultSyncFolder : PassportDriveSelection
+    data class CustomFolder(val folderId: String?, val folderName: String) : PassportDriveSelection
 }
 
 sealed interface NewFolderInputState {
@@ -307,6 +313,19 @@ fun MainScreen(
 
     var activeOverlayModal by remember { mutableStateOf<DashboardOverlayModal>(DashboardOverlayModal.None) }
     var activeFolderPickerState by remember { mutableStateOf<ActiveFolderPickerState>(ActiveFolderPickerState.Closed) }
+    var passportDriveSelection by remember {
+        mutableStateOf<PassportDriveSelection>(PassportDriveSelection.DefaultSyncFolder)
+    }
+    val passportDriveTarget = when (val selection = passportDriveSelection) {
+        is PassportDriveSelection.DefaultSyncFolder -> com.example.ui.PassportDriveTarget(
+            folderId = driveFolderId,
+            folderName = driveFolderName.ifBlank { "My Drive" }
+        )
+        is PassportDriveSelection.CustomFolder -> com.example.ui.PassportDriveTarget(
+            folderId = selection.folderId,
+            folderName = selection.folderName.ifBlank { "My Drive" }
+        )
+    }
     var scanFlowModalState by remember { mutableStateOf<ScanFlowModalState>(ScanFlowModalState.None) }
     var fabMenuState by remember { mutableStateOf(FabMenuState.COLLAPSED) }
     var activeTab by remember { mutableStateOf(AppScreenTab.DASHBOARD) }
@@ -2122,7 +2141,26 @@ fun MainScreen(
                     }
                 }
                 AppScreenTab.PASSPORT -> {
-                    com.example.ui.PassportPhotoScreen(onBack = { activeTab = AppScreenTab.DASHBOARD })
+                    com.example.ui.PassportPhotoScreen(
+                        onBack = { activeTab = AppScreenTab.DASHBOARD },
+                        googleEmail = googleEmail,
+                        driveTarget = passportDriveTarget,
+                        onChooseDriveFolder = {
+                            activeFolderPickerState = ActiveFolderPickerState.Open(FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER)
+                        },
+                        onSaveAndUploadPassport = { tempFile, clientName, isPrintSheet, uploadToDrive, onResult ->
+                            viewModel.saveAndUploadPassportPhoto(
+                                context = context,
+                                sourceTempFile = tempFile,
+                                customClientName = clientName,
+                                isPrintSheet = isPrintSheet,
+                                targetFolderId = passportDriveTarget.folderId,
+                                targetFolderName = passportDriveTarget.folderName,
+                                uploadToDrive = uploadToDrive,
+                                onResult = onResult
+                            )
+                        }
+                    )
                 }
                 AppScreenTab.APPROVALS -> {
                     val dbLogs by viewModel.dbLogs.collectAsStateWithLifecycle()
@@ -4714,7 +4752,11 @@ fun MainScreen(
             onDismissRequest = { activeFolderPickerState = ActiveFolderPickerState.Closed },
             title = {
                 Text(
-                    text = "Select Drive Destination",
+                    text = when (currentFolderPickerPurpose) {
+                        FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER -> "Select Passport Drive Folder"
+                        FolderPickerPurpose.MERGE_DESTINATION_FOLDER -> "Select Merged PDF Folder"
+                        FolderPickerPurpose.DEFAULT_SYNC_FOLDER -> "Select Drive Destination"
+                    },
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -4725,7 +4767,11 @@ fun MainScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Decide where to store your PDFs and scanned images. Navigate, click to enter subfolders, or create new ones.",
+                        text = when (currentFolderPickerPurpose) {
+                            FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER -> "Choose or create the Google Drive folder where your Passport photos and 4×6 print sheets will be uploaded."
+                            FolderPickerPurpose.MERGE_DESTINATION_FOLDER -> "Choose or create the Google Drive folder for your merged PDF document."
+                            FolderPickerPurpose.DEFAULT_SYNC_FOLDER -> "Decide where to store your PDFs and scanned images. Navigate, click to enter subfolders, or create new ones."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -5031,6 +5077,12 @@ fun MainScreen(
                                         )
                                     )
                                 }
+                            }
+                            FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER -> {
+                                passportDriveSelection = PassportDriveSelection.CustomFolder(
+                                    folderId = currentFolderId,
+                                    folderName = currentFolderName?.ifBlank { "My Drive" } ?: "My Drive"
+                                )
                             }
                             FolderPickerPurpose.DEFAULT_SYNC_FOLDER -> {
                                 viewModel.selectCurrentAsDestination()
