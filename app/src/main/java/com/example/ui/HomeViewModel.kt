@@ -222,6 +222,15 @@ class HomeViewModel(
     val autoEnhanceEnabled = settingsRepository.autoEnhanceEnabled
         .stateIn(viewModelScope, SharingStarted.Lazily, true)
 
+    val passportTargetSizeKb = settingsRepository.passportTargetSizeKb
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    val passportDriveFolderId = settingsRepository.passportDriveFolderId
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val passportDriveFolderName = settingsRepository.passportDriveFolderName
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     private val ADMIN_SECURITY_KEY = "DASMO_ADMIN_SEC_26042004_SUBHOJIT_CYBER_KEY"
     private val firestore = FirebaseFirestore.getInstance()
     private var authListenerRegistration: ListenerRegistration? = null
@@ -1044,6 +1053,24 @@ class HomeViewModel(
         viewModelScope.launch {
             settingsRepository.setTargetSizeKb(sizeKb)
             _subfolderAtLastSizeChange.value = _targetSubfolder.value
+        }
+    }
+
+    fun updatePassportTargetSizeKb(sizeKb: Int) {
+        viewModelScope.launch {
+            settingsRepository.setPassportTargetSizeKb(sizeKb)
+        }
+    }
+
+    fun updatePassportDriveFolder(folderId: String, folderName: String) {
+        viewModelScope.launch {
+            settingsRepository.setPassportDriveFolder(folderId, folderName)
+        }
+    }
+
+    fun resetPassportDriveFolder() {
+        viewModelScope.launch {
+            settingsRepository.clearPassportDriveFolder()
         }
     }
 
@@ -2080,28 +2107,36 @@ class HomeViewModel(
             val safeLocalJpg = File(context.filesDir, finalJpgName)
             val safeLocalPdf = File(context.filesDir, finalPdfName)
 
+            val isPassportDocument = checkedDocumentType.startsWith("Passport", ignoreCase = true)
+
             // 1. Prepare safeLocalJpg if required
             if (!safeLocalJpg.exists() || safeLocalJpg.length() == 0L) {
                 try {
-                    val isFromRawSinglePage = pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()
-                    val sourceImage = if (isFromRawSinglePage) {
-                        pageFiles!!.first()
-                    } else if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
-                        ImageProcessor.getOrCreateThumbnailFile(context, compressedFile.absolutePath) ?: compressedFile
+                    if (isPassportDocument && compressedFile.exists()) {
+                        if (compressedFile.absolutePath != safeLocalJpg.absolutePath) {
+                            compressedFile.copyTo(safeLocalJpg, overwrite = true)
+                        }
                     } else {
-                        compressedFile
-                    }
-                    if (sourceImage.exists() && !sourceImage.name.endsWith(".pdf", ignoreCase = true)) {
-                        val recompressed = ImageProcessor.compressImage(
-                            file = sourceImage,
-                            targetSizeKb = activeTargetSize,
-                            format = compressionCodec.value,
-                            autoEnhance = if (isFromRawSinglePage) autoEnhanceEnabled.value else false
-                        )
-                        recompressed.copyTo(safeLocalJpg, overwrite = true)
-                        try { recompressed.delete() } catch (e: Exception) {}
-                    } else if (compressedFile.exists() && !compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
-                        compressedFile.copyTo(safeLocalJpg, overwrite = true)
+                        val isFromRawSinglePage = pageFiles != null && pageFiles.size == 1 && pageFiles.first().exists()
+                        val sourceImage = if (isFromRawSinglePage) {
+                            pageFiles!!.first()
+                        } else if (compressedFile.exists() && compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                            ImageProcessor.getOrCreateThumbnailFile(context, compressedFile.absolutePath) ?: compressedFile
+                        } else {
+                            compressedFile
+                        }
+                        if (sourceImage.exists() && !sourceImage.name.endsWith(".pdf", ignoreCase = true)) {
+                            val recompressed = ImageProcessor.compressImage(
+                                file = sourceImage,
+                                targetSizeKb = activeTargetSize,
+                                format = compressionCodec.value,
+                                autoEnhance = if (isFromRawSinglePage) autoEnhanceEnabled.value else false
+                            )
+                            recompressed.copyTo(safeLocalJpg, overwrite = true)
+                            try { recompressed.delete() } catch (e: Exception) {}
+                        } else if (compressedFile.exists() && !compressedFile.name.endsWith(".pdf", ignoreCase = true)) {
+                            compressedFile.copyTo(safeLocalJpg, overwrite = true)
+                        }
                     }
 
                     if (format == UploadFormat.JPEG || format == UploadFormat.BOTH) {
@@ -2216,10 +2251,27 @@ class HomeViewModel(
                     return@withLock
                 }
 
-                var uploadParentId = folderId
-                if (subFolderName.isNotEmpty()) {
-                    updateQueueStatus(queueId, "Locating folder: $subFolderName...", QueueItemPhase.PROCESSING)
-                    uploadParentId = getCachedOrFetchSubFolder(obtainedToken!!, subFolderName, folderId)
+                val pendingPassportPrefs = context.getSharedPreferences("passport_pending_targets", Context.MODE_PRIVATE)
+                val savedPendingRaw = if (isPassportDocument) {
+                    pendingPassportPrefs.getString(dbFileName, null)
+                } else null
+                val parsedPendingParts = savedPendingRaw?.split("|", limit = 2)
+
+                var uploadParentId: String
+                var resolvedPassportFolderName: String? = null
+                if (isPassportDocument) {
+                    val customId = parsedPendingParts?.getOrNull(0)?.takeIf { it.isNotBlank() }
+                        ?: settingsRepository.passportDriveFolderId.first()?.takeIf { it.isNotBlank() }
+                    val customName = parsedPendingParts?.getOrNull(1)?.takeIf { it.isNotBlank() }
+                        ?: settingsRepository.passportDriveFolderName.first()?.takeIf { it.isNotBlank() }
+                    uploadParentId = customId ?: folderId
+                    resolvedPassportFolderName = customName ?: (settingsRepository.driveFolderName.first() ?: "Root")
+                } else {
+                    uploadParentId = folderId
+                    if (subFolderName.isNotEmpty()) {
+                        updateQueueStatus(queueId, "Locating folder: $subFolderName...", QueueItemPhase.PROCESSING)
+                        uploadParentId = getCachedOrFetchSubFolder(obtainedToken!!, subFolderName, folderId)
+                    }
                 }
 
                 var isJpgUploaded = false
@@ -2280,9 +2332,16 @@ class HomeViewModel(
                 }
 
                 val driveFolderNameStr = settingsRepository.driveFolderName.first() ?: "Root"
-                val builtDrivePath = "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
+                val builtDrivePath = if (isPassportDocument && resolvedPassportFolderName != null) {
+                    "My Drive/$resolvedPassportFolderName"
+                } else {
+                    "My Drive/$driveFolderNameStr${if (subFolderName.isNotEmpty()) "/$subFolderName" else ""}"
+                }
 
                 if (overallSuccess) {
+                    if (isPassportDocument) {
+                        pendingPassportPrefs.edit().remove(dbFileName).apply()
+                    }
                     if (insertId != -1L) {
                         try {
                             val updatedEntity = DocumentEntity(
@@ -3690,6 +3749,12 @@ class HomeViewModel(
                 }
 
                 val builtDrivePath = if (isUploadedToDrive) "My Drive/$effectiveFolderName" else null
+                if (!isUploadedToDrive) {
+                    context.getSharedPreferences("passport_pending_targets", Context.MODE_PRIVATE)
+                        .edit()
+                        .putString(finalFileName, "$effectiveFolderId|$effectiveFolderName")
+                        .apply()
+                }
                 val entity = DocumentEntity(
                     fileName = finalFileName,
                     personName = cleanClient.replace("_", " "),
@@ -3711,24 +3776,26 @@ class HomeViewModel(
 
                 updatePublicFolderSize()
 
+                val finalKb = ((persistentFile.length() + 512L) / 1024L).coerceAtLeast(1L)
+
                 if (uploadToDrive) {
                     if (isUploadedToDrive) {
-                        updateQueueStatus(queueId, "Uploaded to $effectiveFolderName", QueueItemPhase.COMPLETED)
-                        postStatusMessage("Uploaded $finalFileName to Drive ($effectiveFolderName)", StatusBannerTone.SUCCESS)
+                        updateQueueStatus(queueId, "Uploaded to $effectiveFolderName (${finalKb} KB)", QueueItemPhase.COMPLETED)
+                        postStatusMessage("Uploaded $finalFileName (${finalKb} KB) to Drive ($effectiveFolderName)", StatusBannerTone.SUCCESS)
                         fetchDriveFiles(context)
-                        onResult(true, "Uploaded to Google Drive ($effectiveFolderName) & saved to device ($finalFileName)", true)
+                        onResult(true, "Uploaded to Google Drive ($effectiveFolderName) • ${finalKb} KB ($finalFileName)", true)
                     } else if (email.isNullOrBlank()) {
                         updateQueueStatus(queueId, "Saved locally (Sign in to Drive)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
-                        postStatusMessage("Saved locally. Sign in with Google to upload to Drive.", StatusBannerTone.WARNING)
-                        onResult(false, "Saved to phone ($finalFileName), but Google Drive account is not signed in.", false)
+                        postStatusMessage("Saved locally (${finalKb} KB). Sign in with Google to upload to Drive.", StatusBannerTone.WARNING)
+                        onResult(false, "Saved to phone ($finalFileName, ${finalKb} KB), but Google Drive account is not signed in.", false)
                     } else {
                         updateQueueStatus(queueId, "Saved locally (Drive upload failed)", QueueItemPhase.SAVED_LOCALLY_NEEDS_SYNC)
-                        postStatusMessage("Saved locally; Drive upload failed (can retry from Captures).", StatusBannerTone.WARNING)
-                        onResult(false, "Saved to phone ($finalFileName). Drive upload failed — you can retry from Captures.", false)
+                        postStatusMessage("Saved locally (${finalKb} KB); Drive upload failed (can retry from Captures).", StatusBannerTone.WARNING)
+                        onResult(false, "Saved to phone ($finalFileName, ${finalKb} KB). Drive upload failed — you can retry from Captures.", false)
                     }
                 } else {
-                    postStatusMessage("Saved $finalFileName to Documents/Dasmo Scan", StatusBannerTone.SUCCESS)
-                    onResult(true, "Saved to Documents/Dasmo Scan/$finalFileName", false)
+                    postStatusMessage("Saved $finalFileName (${finalKb} KB) to Documents/Dasmo Scan", StatusBannerTone.SUCCESS)
+                    onResult(true, "Saved ${finalKb} KB to Documents/Dasmo Scan/$finalFileName", false)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()

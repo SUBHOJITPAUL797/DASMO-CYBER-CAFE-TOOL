@@ -261,6 +261,7 @@ fun MainScreen(
     val context = LocalContext.current
     val documents by viewModel.documents.collectAsStateWithLifecycle()
     val targetSizeKb by viewModel.targetSizeKb.collectAsStateWithLifecycle()
+    val passportTargetSizeKb by viewModel.passportTargetSizeKb.collectAsStateWithLifecycle()
     val imageFormat by viewModel.imageFormat.collectAsStateWithLifecycle()
     val compressionCodec by viewModel.compressionCodec.collectAsStateWithLifecycle()
     val enableAiAnalysis by viewModel.enableAiAnalysis.collectAsStateWithLifecycle()
@@ -296,6 +297,8 @@ fun MainScreen(
     val googleEmail by viewModel.googleEmail.collectAsStateWithLifecycle()
     val driveFolderId by viewModel.driveFolderId.collectAsStateWithLifecycle()
     val driveFolderName by viewModel.driveFolderName.collectAsStateWithLifecycle()
+    val passportDriveFolderId by viewModel.passportDriveFolderId.collectAsStateWithLifecycle()
+    val passportDriveFolderName by viewModel.passportDriveFolderName.collectAsStateWithLifecycle()
     val targetSubfolder by viewModel.targetSubfolder.collectAsStateWithLifecycle()
     val subfolderAtLastSizeChange by viewModel.subfolderAtLastSizeChange.collectAsStateWithLifecycle()
 
@@ -313,17 +316,22 @@ fun MainScreen(
 
     var activeOverlayModal by remember { mutableStateOf<DashboardOverlayModal>(DashboardOverlayModal.None) }
     var activeFolderPickerState by remember { mutableStateOf<ActiveFolderPickerState>(ActiveFolderPickerState.Closed) }
-    var passportDriveSelection by remember {
-        mutableStateOf<PassportDriveSelection>(PassportDriveSelection.DefaultSyncFolder)
+    val passportDriveSelection: PassportDriveSelection = if (!passportDriveFolderId.isNullOrBlank()) {
+        PassportDriveSelection.CustomFolder(
+            folderId = passportDriveFolderId,
+            folderName = passportDriveFolderName?.ifBlank { "My Drive" } ?: "My Drive"
+        )
+    } else {
+        PassportDriveSelection.DefaultSyncFolder
     }
-    val passportDriveTarget = when (val selection = passportDriveSelection) {
+    val passportDriveTarget = when (passportDriveSelection) {
         is PassportDriveSelection.DefaultSyncFolder -> com.example.ui.PassportDriveTarget(
             folderId = driveFolderId,
             folderName = driveFolderName.ifBlank { "My Drive" }
         )
         is PassportDriveSelection.CustomFolder -> com.example.ui.PassportDriveTarget(
-            folderId = selection.folderId,
-            folderName = selection.folderName.ifBlank { "My Drive" }
+            folderId = passportDriveSelection.folderId,
+            folderName = passportDriveSelection.folderName
         )
     }
     var scanFlowModalState by remember { mutableStateOf<ScanFlowModalState>(ScanFlowModalState.None) }
@@ -2145,6 +2153,14 @@ fun MainScreen(
                         onBack = { activeTab = AppScreenTab.DASHBOARD },
                         googleEmail = googleEmail,
                         driveTarget = passportDriveTarget,
+                        isCustomDriveFolder = passportDriveSelection is PassportDriveSelection.CustomFolder,
+                        onResetDriveFolderToDefault = {
+                            viewModel.resetPassportDriveFolder()
+                        },
+                        passportTargetSizeKb = passportTargetSizeKb,
+                        onUpdatePassportTargetSizeKb = { sizeKb ->
+                            viewModel.updatePassportTargetSizeKb(sizeKb)
+                        },
                         onChooseDriveFolder = {
                             activeFolderPickerState = ActiveFolderPickerState.Open(FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER)
                         },
@@ -5079,9 +5095,9 @@ fun MainScreen(
                                 }
                             }
                             FolderPickerPurpose.PASSPORT_DESTINATION_FOLDER -> {
-                                passportDriveSelection = PassportDriveSelection.CustomFolder(
-                                    folderId = currentFolderId,
-                                    folderName = currentFolderName?.ifBlank { "My Drive" } ?: "My Drive"
+                                viewModel.updatePassportDriveFolder(
+                                    folderId = currentFolderId.ifBlank { "root" },
+                                    folderName = currentFolderName.ifBlank { "My Drive" }
                                 )
                             }
                             FolderPickerPurpose.DEFAULT_SYNC_FOLDER -> {

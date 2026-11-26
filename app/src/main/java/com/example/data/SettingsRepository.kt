@@ -27,6 +27,24 @@ class SettingsRepository(private val context: Context) {
     private val COMPRESSION_CODEC = stringPreferencesKey("compression_codec")
     private val STORAGE_LIMIT_MB = intPreferencesKey("storage_limit_mb")
     private val BATCH_PAGES_PER_DOC = intPreferencesKey("batch_pages_per_doc")
+    private val PASSPORT_TARGET_SIZE_KB = intPreferencesKey("passport_target_size_kb")
+    private val PASSPORT_DRIVE_FOLDER_ID = stringPreferencesKey("passport_drive_folder_id")
+    private val PASSPORT_DRIVE_FOLDER_NAME = stringPreferencesKey("passport_drive_folder_name")
+
+    val passportTargetSizeKb: Flow<Int> = context.dataStore.data
+        .map { preferences ->
+            preferences[PASSPORT_TARGET_SIZE_KB] ?: 0 // 0 = Max Quality (98%), >0 = Target KB limit persisted until changed
+        }
+
+    val passportDriveFolderId: Flow<String?> = context.dataStore.data
+        .map { preferences ->
+            preferences[PASSPORT_DRIVE_FOLDER_ID]
+        }
+
+    val passportDriveFolderName: Flow<String?> = context.dataStore.data
+        .map { preferences ->
+            preferences[PASSPORT_DRIVE_FOLDER_NAME]
+        }
 
     val batchPagesPerDoc: Flow<Int> = context.dataStore.data
         .map { preferences ->
@@ -178,6 +196,26 @@ class SettingsRepository(private val context: Context) {
     suspend fun setBatchPagesPerDoc(pages: Int) {
         context.dataStore.edit { preferences ->
             preferences[BATCH_PAGES_PER_DOC] = pages.coerceAtLeast(1)
+        }
+    }
+
+    suspend fun setPassportTargetSizeKb(sizeKb: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[PASSPORT_TARGET_SIZE_KB] = if (sizeKb <= 0) 0 else sizeKb.coerceIn(10, 5000)
+        }
+    }
+
+    suspend fun setPassportDriveFolder(id: String, name: String) {
+        context.dataStore.edit { preferences ->
+            preferences[PASSPORT_DRIVE_FOLDER_ID] = id.ifBlank { "root" }
+            preferences[PASSPORT_DRIVE_FOLDER_NAME] = name.ifBlank { "My Drive" }
+        }
+    }
+
+    suspend fun clearPassportDriveFolder() {
+        context.dataStore.edit { preferences ->
+            preferences.remove(PASSPORT_DRIVE_FOLDER_ID)
+            preferences.remove(PASSPORT_DRIVE_FOLDER_NAME)
         }
     }
 }

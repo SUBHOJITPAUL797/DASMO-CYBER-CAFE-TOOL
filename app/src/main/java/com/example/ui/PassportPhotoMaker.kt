@@ -82,15 +82,27 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Typeface
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 data class PassportDriveTarget(
@@ -183,12 +195,60 @@ private enum class PassportCameraFlash(val mode: Int, val label: String) {
     }
 }
 
+private data class PortraitLightingConfig(
+    val brightness: Float = 0f,
+    val contrast: Float = 1f
+) {
+    val isNeutral: Boolean
+        get() = brightness == 0f && contrast == 1f
+
+    fun toColorMatrixFloatArray(): FloatArray {
+        val scale = contrast
+        val translate = (1f - contrast) * 128f + brightness
+        return floatArrayOf(
+            scale, 0f, 0f, 0f, translate,
+            0f, scale, 0f, 0f, translate,
+            0f, 0f, scale, 0f, translate,
+            0f, 0f, 0f, 1f, 0f
+        )
+    }
+}
+
+private sealed interface NameDateStampState {
+    data object Off : NameDateStampState
+    data class Enabled(
+        val nameText: String,
+        val dateText: String
+    ) : NameDateStampState
+}
+
+private enum class PrintSheetCopyCount(
+    val count: Int,
+    val cols: Int,
+    val rows: Int,
+    val shortLabel: String
+) {
+    FOUR(4, 2, 2, "4 Photos"),
+    SIX(6, 3, 2, "6 Photos"),
+    EIGHT(8, 4, 2, "8 Photos")
+}
+
+private enum class PrintSheetCutMarksState {
+    ENABLED,
+    HIDDEN
+}
+
 private sealed interface PassportModalState {
     data object None : PassportModalState
     data class LiveCamera(
         val lens: PassportCameraLens = PassportCameraLens.BACK,
         val flash: PassportCameraFlash = PassportCameraFlash.OFF,
         val shutterState: ShutterCaptureState = ShutterCaptureState.IDLE
+    ) : PassportModalState
+    data class CustomCompressionDialog(val sizeInput: String) : PassportModalState
+    data class SheetPreviewDialog(
+        val copyCount: PrintSheetCopyCount,
+        val cutMarksState: PrintSheetCutMarksState
     ) : PassportModalState
 }
 
@@ -224,6 +284,10 @@ fun PassportPhotoScreen(
     onBack: () -> Unit,
     googleEmail: String? = null,
     driveTarget: PassportDriveTarget = PassportDriveTarget(null, "My Drive"),
+    isCustomDriveFolder: Boolean = false,
+    onResetDriveFolderToDefault: () -> Unit = {},
+    passportTargetSizeKb: Int = 0,
+    onUpdatePassportTargetSizeKb: (Int) -> Unit = {},
     onChooseDriveFolder: () -> Unit = {},
     onSaveAndUploadPassport: (
         tempFile: File,
@@ -248,11 +312,20 @@ fun PassportPhotoScreen(
         )
     }
 
+    val defaultDateLabel = remember {
+        SimpleDateFormat("dd-MM-yyyy", Locale.US).format(Date())
+    }
+
     var selectedColor by remember { mutableStateOf(bgPalette[0].color) }
     var selectedDimension by remember { mutableStateOf(PassportSizeStandard.INDIA_UK_EU_CM) }
     var guideState by remember { mutableStateOf(AlignmentGuideState.VISIBLE) }
     var edgeCleanMode by remember { mutableStateOf(EdgeHaloCleanMode.DEEP_CLEAN) }
     var clientNameInput by remember { mutableStateOf("") }
+    var lightingConfig by remember { mutableStateOf(PortraitLightingConfig()) }
+    var stampState by remember { mutableStateOf<NameDateStampState>(NameDateStampState.Off) }
+    var sheetCopyCount by remember { mutableStateOf(PrintSheetCopyCount.EIGHT) }
+    var sheetCutMarksState by remember { mutableStateOf(PrintSheetCutMarksState.ENABLED) }
+    var estimatedSingleKb by remember { mutableStateOf<Int?>(null) }
 
     var cropScale by remember { mutableFloatStateOf(1f) }
     var cropOffsetX by remember { mutableFloatStateOf(0f) }
@@ -371,6 +444,38 @@ fun PassportPhotoScreen(
         }
     }
 
+    // Debounced live output JPEG size estimate for Single Passport Photo
+    LaunchedEffect(
+        cutoutForegroundBitmap,
+        originalBitmap,
+        selectedDimension,
+        selectedColor,
+        cropScale,
+        cropOffsetX,
+        cropOffsetY,
+        passportTargetSizeKb,
+        lightingConfig,
+        stampState
+    ) {
+        val activeBmp = cutoutForegroundBitmap ?: originalBitmap
+        if (activeBmp == null) {
+            estimatedSingleKb = null
+            return@LaunchedEffect
+        }
+        delay(220)
+        estimatedSingleKb = estimatePassportJpegSizeKb(
+            bitmap = activeBmp,
+            dimension = selectedDimension,
+            bgColor = selectedColor,
+            cropScale = cropScale,
+            cropOffsetX = cropOffsetX,
+            cropOffsetY = cropOffsetY,
+            targetSizeKb = passportTargetSizeKb,
+            lightingConfig = lightingConfig,
+            stampState = stampState
+        )
+    }
+
     fun triggerExport(isPrintSheet: Boolean, uploadToDrive: Boolean) {
         if (isBusy) return
         val bmpToUse = cutoutForegroundBitmap ?: originalBitmap ?: return
@@ -385,13 +490,30 @@ fun PassportPhotoScreen(
 
             val generatedFile = if (isPrintSheet) {
                 generatePassportSheetJpeg(
-                    context, bmpToUse, selectedDimension, selectedColor,
-                    cropScale, cropOffsetX, cropOffsetY
+                    context = context,
+                    bitmap = bmpToUse,
+                    dimension = selectedDimension,
+                    bgColor = selectedColor,
+                    cropScale = cropScale,
+                    cropOffsetX = cropOffsetX,
+                    cropOffsetY = cropOffsetY,
+                    copyCount = sheetCopyCount,
+                    cutMarksState = sheetCutMarksState,
+                    lightingConfig = lightingConfig,
+                    stampState = stampState
                 )
             } else {
                 generatePassportJpeg(
-                    context, bmpToUse, selectedDimension, selectedColor,
-                    cropScale, cropOffsetX, cropOffsetY
+                    context = context,
+                    bitmap = bmpToUse,
+                    dimension = selectedDimension,
+                    bgColor = selectedColor,
+                    cropScale = cropScale,
+                    cropOffsetX = cropOffsetX,
+                    cropOffsetY = cropOffsetY,
+                    targetSizeKb = passportTargetSizeKb,
+                    lightingConfig = lightingConfig,
+                    stampState = stampState
                 )
             }
 
@@ -439,6 +561,93 @@ fun PassportPhotoScreen(
         )
     }
 
+    val customCompModal = modalState as? PassportModalState.CustomCompressionDialog
+    if (customCompModal != null) {
+        val parsedKb = customCompModal.sizeInput.toIntOrNull()
+        AlertDialog(
+            onDismissRequest = { modalState = PassportModalState.None },
+            title = { Text("Passport Photo Target Size", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Set a permanent max JPEG file size (10 – 2000 KB) for Single Passport Photos. Separate from Homepage compression and stays saved until you change it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = customCompModal.sizeInput,
+                        onValueChange = { input ->
+                            val clean = input.filter { it.isDigit() }.take(4)
+                            modalState = PassportModalState.CustomCompressionDialog(clean)
+                        },
+                        label = { Text("Target Size (KB)") },
+                        placeholder = { Text("e.g. 50") },
+                        singleLine = true,
+                        suffix = { Text("KB", fontWeight = FontWeight.Bold) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("passport_custom_kb_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = parsedKb != null && parsedKb in 10..2000,
+                    onClick = {
+                        parsedKb?.let { validKb ->
+                            onUpdatePassportTargetSizeKb(validKb.coerceIn(10, 2000))
+                        }
+                        modalState = PassportModalState.None
+                    }
+                ) {
+                    Text("Save Default", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { modalState = PassportModalState.None }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    val sheetPreviewModal = modalState as? PassportModalState.SheetPreviewDialog
+    val previewSourceBmp = cutoutForegroundBitmap ?: originalBitmap
+    if (sheetPreviewModal != null && previewSourceBmp != null) {
+        PassportSheetPreviewDialog(
+            sourceBitmap = previewSourceBmp,
+            dimension = selectedDimension,
+            bgColor = selectedColor,
+            cropScale = cropScale,
+            cropOffsetX = cropOffsetX,
+            cropOffsetY = cropOffsetY,
+            lightingConfig = lightingConfig,
+            stampState = stampState,
+            copyCount = sheetPreviewModal.copyCount,
+            cutMarksState = sheetPreviewModal.cutMarksState,
+            driveFolderName = driveTarget.folderName,
+            onChangeCopyCount = { newCount ->
+                sheetCopyCount = newCount
+                modalState = sheetPreviewModal.copy(copyCount = newCount)
+            },
+            onToggleCutMarks = { nextCutMarks ->
+                sheetCutMarksState = nextCutMarks
+                modalState = sheetPreviewModal.copy(cutMarksState = nextCutMarks)
+            },
+            onSaveLocal = {
+                modalState = PassportModalState.None
+                triggerExport(isPrintSheet = true, uploadToDrive = false)
+            },
+            onUploadDrive = {
+                modalState = PassportModalState.None
+                triggerExport(isPrintSheet = true, uploadToDrive = true)
+            },
+            onDismiss = { modalState = PassportModalState.None }
+        )
+    }
+
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
@@ -459,6 +668,39 @@ fun PassportPhotoScreen(
                     }
                 },
                 actions = {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                        modifier = Modifier
+                            .padding(end = if (originalBitmap != null) 4.dp else 8.dp)
+                            .clip(RoundedCornerShape(50))
+                            .clickable(enabled = !isBusy) {
+                                val initText = if (passportTargetSizeKb > 0) passportTargetSizeKb.toString() else "50"
+                                modalState = PassportModalState.CustomCompressionDialog(initText)
+                            }
+                            .testTag("passport_topbar_compression_pill")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Compress,
+                                contentDescription = "Passport Compression Size",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = if (passportTargetSizeKb > 0) "${passportTargetSizeKb}KB" else "MAX",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+
                     if (originalBitmap != null) {
                         IconButton(
                             onClick = {
@@ -640,6 +882,17 @@ fun PassportPhotoScreen(
                         }
                     }
                 }
+
+                // Dedicated Passport Compression Setting visible on Launchpad too (persisted until changed)
+                PassportCompressionCard(
+                    passportTargetSizeKb = passportTargetSizeKb,
+                    isBusy = isBusy,
+                    onSelectTargetSizeKb = onUpdatePassportTargetSizeKb,
+                    onOpenCustomDialog = {
+                        val initText = if (passportTargetSizeKb > 0) passportTargetSizeKb.toString() else "50"
+                        modalState = PassportModalState.CustomCompressionDialog(initText)
+                    }
+                )
             } else {
                 // Interactive Studio Canvas Card
                 Card(
@@ -677,9 +930,14 @@ fun PassportPhotoScreen(
                                 }
                         ) {
                             val displayBmp = cutoutForegroundBitmap ?: originalBitmap!!
+                            val previewColorFilter = remember(lightingConfig) {
+                                if (lightingConfig.isNeutral) null
+                                else ColorFilter.colorMatrix(ColorMatrix(lightingConfig.toColorMatrixFloatArray()))
+                            }
                             Image(
                                 bitmap = displayBmp.asImageBitmap(),
                                 contentDescription = "Passport Portrait Preview",
+                                colorFilter = previewColorFilter,
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .graphicsLayer {
@@ -690,6 +948,47 @@ fun PassportPhotoScreen(
                                     },
                                 contentScale = ContentScale.Crop
                             )
+
+                            // Live Govt Portal Name & Date Bottom Strip Preview
+                            val activeStamp = stampState as? NameDateStampState.Enabled
+                            if (activeStamp != null && (activeStamp.nameText.isNotBlank() || activeStamp.dateText.isNotBlank())) {
+                                Column(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .fillMaxHeight(0.155f)
+                                        .background(Color.White)
+                                        .border(0.75.dp, Color(0xFF222222))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    if (activeStamp.nameText.isNotBlank()) {
+                                        Text(
+                                            text = activeStamp.nameText.trim().uppercase(),
+                                            color = Color.Black,
+                                            fontSize = 10.sp,
+                                            lineHeight = 11.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                    if (activeStamp.dateText.isNotBlank()) {
+                                        Text(
+                                            text = activeStamp.dateText.trim().uppercase(),
+                                            color = Color.Black,
+                                            fontSize = 9.sp,
+                                            lineHeight = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                            }
 
                             // Head & Shoulders Alignment Guide
                             if (guideState == AlignmentGuideState.VISIBLE) {
@@ -1020,6 +1319,17 @@ fun PassportPhotoScreen(
                     }
                 }
 
+                // Studio Portrait Lighting (Brightness & Contrast) + Govt Name & Date Stamp Card
+                PassportStudioLightingAndStampCard(
+                    lightingConfig = lightingConfig,
+                    stampState = stampState,
+                    defaultDateLabel = defaultDateLabel,
+                    clientNameHint = clientNameInput,
+                    isBusy = isBusy,
+                    onUpdateLighting = { lightingConfig = it },
+                    onUpdateStampState = { stampState = it }
+                )
+
                 // Dimension Selector Card
                 Card(
                     shape = RoundedCornerShape(20.dp),
@@ -1061,6 +1371,17 @@ fun PassportPhotoScreen(
                     }
                 }
 
+                // Dedicated Passport Photo Compression Card (Separated from Homepage, Persisted Always)
+                PassportCompressionCard(
+                    passportTargetSizeKb = passportTargetSizeKb,
+                    isBusy = isBusy,
+                    onSelectTargetSizeKb = onUpdatePassportTargetSizeKb,
+                    onOpenCustomDialog = {
+                        val initText = if (passportTargetSizeKb > 0) passportTargetSizeKb.toString() else "50"
+                        modalState = PassportModalState.CustomCompressionDialog(initText)
+                    }
+                )
+
                 // Targeted Google Drive Folder & Client Naming Studio Card
                 Card(
                     shape = RoundedCornerShape(22.dp),
@@ -1077,7 +1398,11 @@ fun PassportPhotoScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 Box(
                                     modifier = Modifier
                                         .size(34.dp)
@@ -1102,6 +1427,20 @@ fun PassportPhotoScreen(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = if (isCustomDriveFolder) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(
+                                    text = if (isCustomDriveFolder) "Saved Custom" else "Default Sync",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isCustomDriveFolder) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
                             }
                         }
 
@@ -1159,7 +1498,7 @@ fun PassportPhotoScreen(
                                     )
                                     Column {
                                         Text(
-                                            text = "Target Google Drive Folder",
+                                            text = "Target Google Drive Folder (Persisted)",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -1190,12 +1529,38 @@ fun PassportPhotoScreen(
                                             modifier = Modifier.size(13.dp)
                                         )
                                         Text(
-                                            "Change Folder",
+                                            "Change",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = MaterialTheme.colorScheme.onPrimary
                                         )
                                     }
+                                }
+                            }
+                        }
+
+                        if (isCustomDriveFolder) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = onResetDriveFolderToDefault,
+                                    enabled = !isBusy,
+                                    modifier = Modifier.testTag("passport_reset_drive_folder_button"),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Restore,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        "Use Default Sync Folder",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
@@ -1264,13 +1629,35 @@ fun PassportPhotoScreen(
                             fontWeight = FontWeight.ExtraBold
                         )
 
-                        // 1. Single Passport Photo Row (Save Phone + Upload Drive)
-                        Text(
-                            "Single Passport Photo (${selectedDimension.widthPx}×${selectedDimension.heightPx} px)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Bold
-                        )
+                        // 1. Single Passport Photo Row + Live Estimated Output Size
+                        val compressionTag = if (passportTargetSizeKb > 0) "Max ${passportTargetSizeKb} KB" else "Max 98% Quality"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Single Photo (${selectedDimension.widthPx}×${selectedDimension.heightPx} • $compressionTag)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            estimatedSingleKb?.let { kb ->
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f)
+                                ) {
+                                    Text(
+                                        text = "Est. ~$kb KB",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1317,13 +1704,109 @@ fun PassportPhotoScreen(
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
-                        // 2. 8-Photo 4x6 Print Sheet Row (Save Phone + Upload Drive)
-                        Text(
-                            "8-Photo 4×6 Printable Sheet (300 DPI Lab Grid)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Bold
-                        )
+                        // 2. Customizable 4x6 Print Sheet Row (4 / 6 / 8 Copies + Cut Marks + Live Preview Grid)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "4×6 Printable Sheet (300 DPI)",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                            TextButton(
+                                onClick = {
+                                    modalState = PassportModalState.SheetPreviewDialog(
+                                        copyCount = sheetCopyCount,
+                                        cutMarksState = sheetCutMarksState
+                                    )
+                                },
+                                enabled = !isBusy,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                modifier = Modifier.testTag("passport_preview_sheet_button")
+                            ) {
+                                Icon(Icons.Default.Preview, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Preview 4×6 Grid", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold)
+                            }
+                        }
+
+                        // Copy count selector (4 / 6 / 8)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            PrintSheetCopyCount.entries.forEach { countOption ->
+                                val selected = sheetCopyCount == countOption
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                    border = BorderStroke(
+                                        width = if (selected) 1.5.dp else 1.dp,
+                                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 42.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable(enabled = !isBusy) { sheetCopyCount = countOption }
+                                        .testTag("passport_sheet_copies_${countOption.count}")
+                                ) {
+                                    Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(vertical = 8.dp)) {
+                                        Text(
+                                            text = countOption.shortLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Cut Marks Toggle Row
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable(enabled = !isBusy) {
+                                    sheetCutMarksState = if (sheetCutMarksState == PrintSheetCutMarksState.ENABLED) {
+                                        PrintSheetCutMarksState.HIDDEN
+                                    } else {
+                                        PrintSheetCutMarksState.ENABLED
+                                    }
+                                }
+                                .padding(vertical = 2.dp, horizontal = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.ContentCut,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Text(
+                                    text = "Corner Scissor Cut Marks & Borders",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            Switch(
+                                checked = sheetCutMarksState == PrintSheetCutMarksState.ENABLED,
+                                onCheckedChange = { enabled ->
+                                    sheetCutMarksState = if (enabled) PrintSheetCutMarksState.ENABLED else PrintSheetCutMarksState.HIDDEN
+                                },
+                                enabled = !isBusy
+                            )
+                        }
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1373,6 +1856,612 @@ fun PassportPhotoScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun PassportStudioLightingAndStampCard(
+    lightingConfig: PortraitLightingConfig,
+    stampState: NameDateStampState,
+    defaultDateLabel: String,
+    clientNameHint: String,
+    isBusy: Boolean,
+    onUpdateLighting: (PortraitLightingConfig) -> Unit,
+    onUpdateStampState: (NameDateStampState) -> Unit
+) {
+    val activeStamp = stampState as? NameDateStampState.Enabled
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.LightMode,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Text(
+                        "Studio Lighting & Portal Stamp",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                if (!lightingConfig.isNeutral) {
+                    TextButton(
+                        onClick = { onUpdateLighting(PortraitLightingConfig()) },
+                        enabled = !isBusy,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.testTag("passport_reset_lighting_button")
+                    ) {
+                        Text("Reset Tone", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            // Brightness Slider
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Face Brightness", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "${if (lightingConfig.brightness >= 0f) "+" else ""}${lightingConfig.brightness.roundToInt()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = lightingConfig.brightness,
+                    onValueChange = { onUpdateLighting(lightingConfig.copy(brightness = it)) },
+                    valueRange = -38f..38f,
+                    enabled = !isBusy,
+                    modifier = Modifier.testTag("passport_brightness_slider")
+                )
+            }
+
+            // Contrast Slider
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Studio Contrast", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        text = "${(lightingConfig.contrast * 100f).roundToInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = lightingConfig.contrast,
+                    onValueChange = { onUpdateLighting(lightingConfig.copy(contrast = it)) },
+                    valueRange = 0.80f..1.30f,
+                    enabled = !isBusy,
+                    modifier = Modifier.testTag("passport_contrast_slider")
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+            // Govt Portal Name & Date Bottom Strip Toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = !isBusy) {
+                        if (activeStamp != null) {
+                            onUpdateStampState(NameDateStampState.Off)
+                        } else {
+                            onUpdateStampState(
+                                NameDateStampState.Enabled(
+                                    nameText = clientNameHint.trim(),
+                                    dateText = defaultDateLabel
+                                )
+                            )
+                        }
+                    }
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Print Name & Date Strip (SSC / Govt Forms)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Adds a white strip with centered bold black name & date",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = activeStamp != null,
+                    onCheckedChange = { checked ->
+                        if (checked) {
+                            onUpdateStampState(
+                                NameDateStampState.Enabled(
+                                    nameText = clientNameHint.trim(),
+                                    dateText = defaultDateLabel
+                                )
+                            )
+                        } else {
+                            onUpdateStampState(NameDateStampState.Off)
+                        }
+                    },
+                    enabled = !isBusy,
+                    modifier = Modifier.testTag("passport_name_date_switch")
+                )
+            }
+
+            AnimatedVisibility(
+                visible = activeStamp != null,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                if (activeStamp != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = activeStamp.nameText,
+                            onValueChange = { onUpdateStampState(activeStamp.copy(nameText = it)) },
+                            label = { Text("Name on Photo") },
+                            placeholder = { Text("FULL NAME") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1.3f)
+                                .testTag("passport_stamp_name_input")
+                        )
+                        OutlinedTextField(
+                            value = activeStamp.dateText,
+                            onValueChange = { onUpdateStampState(activeStamp.copy(dateText = it)) },
+                            label = { Text("Date") },
+                            placeholder = { Text(defaultDateLabel) },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("passport_stamp_date_input")
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PassportSheetPreviewDialog(
+    sourceBitmap: Bitmap,
+    dimension: PassportSizeStandard,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float,
+    lightingConfig: PortraitLightingConfig,
+    stampState: NameDateStampState,
+    copyCount: PrintSheetCopyCount,
+    cutMarksState: PrintSheetCutMarksState,
+    driveFolderName: String,
+    onChangeCopyCount: (PrintSheetCopyCount) -> Unit,
+    onToggleCutMarks: (PrintSheetCutMarksState) -> Unit,
+    onSaveLocal: () -> Unit,
+    onUploadDrive: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var sheetBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    LaunchedEffect(
+        sourceBitmap,
+        dimension,
+        bgColor,
+        cropScale,
+        cropOffsetX,
+        cropOffsetY,
+        lightingConfig,
+        stampState,
+        copyCount,
+        cutMarksState
+    ) {
+        val rendered = withContext(Dispatchers.Default) {
+            renderPassportSheetBitmap(
+                bitmap = sourceBitmap,
+                dimension = dimension,
+                bgColor = bgColor,
+                cropScale = cropScale,
+                cropOffsetX = cropOffsetX,
+                cropOffsetY = cropOffsetY,
+                copyCount = copyCount,
+                cutMarksState = cutMarksState,
+                lightingConfig = lightingConfig,
+                stampState = stampState
+            )
+        }
+        val prev = sheetBitmap
+        sheetBitmap = rendered
+        if (prev != null && prev != rendered && !prev.isRecycled) {
+            try { prev.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                sheetBitmap?.let { if (!it.isRecycled) it.recycle() }
+            } catch (_: Exception) {}
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            "4×6 Print Sheet Preview",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            "${copyCount.shortLabel} • 1800×1200 px (300 DPI)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close Preview")
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1.5f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFFE5E7EB))
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val bmp = sheetBitmap
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "4x6 Sheet Print Preview",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        CircularProgressIndicator(modifier = Modifier.size(30.dp))
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PrintSheetCopyCount.entries.forEach { countOption ->
+                        val selected = copyCount == countOption
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = if (selected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { onChangeCopyCount(countOption) }
+                        ) {
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(vertical = 8.dp)) {
+                                Text(
+                                    text = countOption.shortLabel,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Cut Marks & Cell Borders",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Switch(
+                        checked = cutMarksState == PrintSheetCutMarksState.ENABLED,
+                        onCheckedChange = { enabled ->
+                            onToggleCutMarks(if (enabled) PrintSheetCutMarksState.ENABLED else PrintSheetCutMarksState.HIDDEN)
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onSaveLocal,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Save Sheet", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Button(
+                        onClick = onUploadDrive,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00C853), contentColor = Color.White),
+                        modifier = Modifier
+                            .weight(1.2f)
+                            .height(48.dp)
+                    ) {
+                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Upload (${driveFolderName.take(10)})",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PassportCompressionCard(
+    passportTargetSizeKb: Int,
+    isBusy: Boolean,
+    onSelectTargetSizeKb: (Int) -> Unit,
+    onOpenCustomDialog: () -> Unit
+) {
+    val presetSizesKb = remember { listOf(20, 30, 50, 100, 200, 0) }
+    val isCustomActive = passportTargetSizeKb > 0 && passportTargetSizeKb !in presetSizesKb
+
+    Card(
+        shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Compress,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Passport Compression",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Text(
+                            text = "Saved permanently • Separate from Home",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
+                ) {
+                    Text(
+                        text = if (passportTargetSizeKb > 0) "Max $passportTargetSizeKb KB" else "Max Quality",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+            }
+
+            // Preset Row 1: 20 KB, 30 KB, 50 KB
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(20, 30, 50).forEach { kb ->
+                    val selected = passportTargetSizeKb == kb
+                    PassportCompressionChip(
+                        title = "$kb KB",
+                        subtitle = when (kb) {
+                            20 -> "Strict Form"
+                            30 -> "Compact"
+                            else -> "Govt Std"
+                        },
+                        selected = selected,
+                        enabled = !isBusy,
+                        onClick = { onSelectTargetSizeKb(kb) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("passport_compress_chip_${kb}kb")
+                    )
+                }
+            }
+
+            // Preset Row 2: 100 KB, 200 KB, Max Quality
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(100, 200, 0).forEach { kb ->
+                    val selected = passportTargetSizeKb == kb
+                    PassportCompressionChip(
+                        title = if (kb == 0) "Max 98%" else "$kb KB",
+                        subtitle = when (kb) {
+                            100 -> "Portal HQ"
+                            200 -> "HD Print"
+                            else -> "No Limit"
+                        },
+                        selected = selected,
+                        enabled = !isBusy,
+                        onClick = { onSelectTargetSizeKb(kb) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag(if (kb == 0) "passport_compress_chip_max" else "passport_compress_chip_${kb}kb")
+                    )
+                }
+            }
+
+            // Custom KB Pill
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (isCustomActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                border = BorderStroke(
+                    width = if (isCustomActive) 1.5.dp else 1.dp,
+                    color = if (isCustomActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(enabled = !isBusy) { onOpenCustomDialog() }
+                    .testTag("passport_compress_custom_button")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = null,
+                        tint = if (isCustomActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (isCustomActive) "Custom Limit Active: $passportTargetSizeKb KB (Tap to Edit)" else "Set Custom Target Size (KB)",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isCustomActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            Text(
+                text = "Applies adaptive JPEG compression to Single Passport Photos while preserving official pixel dimensions. 8-Photo 4×6 print sheets stay at 300 DPI.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun PassportCompressionChip(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+        ),
+        modifier = modifier
+            .heightIn(min = 50.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled) { onClick() }
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.ExtraBold,
+                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
         }
     }
 }
@@ -1935,26 +3024,28 @@ private fun buildHaloFreeForegroundCutout(
             for (x in 1 until w - 1) {
                 val idx = row + x
                 if (!hasCleanColor[idx] && alphaChannel[idx] > 0) {
+                    // Zero-allocation unrolled 8-neighbor check for high-speed mobile processing
                     var sumR = 0
                     var sumG = 0
                     var sumB = 0
                     var count = 0
 
-                    val neighbors = intArrayOf(
-                        row + x - 1, row + x + 1,
-                        rowUp + x, rowDown + x,
-                        rowUp + x - 1, rowUp + x + 1,
-                        rowDown + x - 1, rowDown + x + 1
-                    )
-                    for (nIdx in neighbors) {
-                        if (hasCleanColor[nIdx]) {
-                            val nRgb = cleanRgb[nIdx]
-                            sumR += (nRgb shr 16) and 0xFF
-                            sumG += (nRgb shr 8) and 0xFF
-                            sumB += nRgb and 0xFF
-                            count++
-                        }
-                    }
+                    val n0 = row + x - 1
+                    if (hasCleanColor[n0]) { val c = cleanRgb[n0]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n1 = row + x + 1
+                    if (hasCleanColor[n1]) { val c = cleanRgb[n1]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n2 = rowUp + x
+                    if (hasCleanColor[n2]) { val c = cleanRgb[n2]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n3 = rowDown + x
+                    if (hasCleanColor[n3]) { val c = cleanRgb[n3]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n4 = rowUp + x - 1
+                    if (hasCleanColor[n4]) { val c = cleanRgb[n4]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n5 = rowUp + x + 1
+                    if (hasCleanColor[n5]) { val c = cleanRgb[n5]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n6 = rowDown + x - 1
+                    if (hasCleanColor[n6]) { val c = cleanRgb[n6]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
+                    val n7 = rowDown + x + 1
+                    if (hasCleanColor[n7]) { val c = cleanRgb[n7]; sumR += (c shr 16) and 0xFF; sumG += (c shr 8) and 0xFF; sumB += c and 0xFF; count++ }
 
                     if (count > 0) {
                         val avgR = sumR / count
@@ -2008,7 +3099,9 @@ private fun renderSinglePassportBitmap(
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,
-    cropOffsetY: Float
+    cropOffsetY: Float,
+    lightingConfig: PortraitLightingConfig = PortraitLightingConfig(),
+    stampState: NameDateStampState = NameDateStampState.Off
 ): Bitmap {
     val widthPixels = dimension.widthPx
     val heightPixels = dimension.heightPx
@@ -2032,8 +3125,190 @@ private fun renderSinglePassportBitmap(
     matrix.postScale(cropScale, cropScale, widthPixels / 2f, heightPixels / 2f)
     matrix.postTranslate(cropOffsetX * widthPixels, cropOffsetY * heightPixels)
 
-    canvas.drawBitmap(bitmap, matrix, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+    val portraitPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG).apply {
+        if (!lightingConfig.isNeutral) {
+            colorFilter = ColorMatrixColorFilter(lightingConfig.toColorMatrixFloatArray())
+        }
+    }
+    canvas.drawBitmap(bitmap, matrix, portraitPaint)
+
+    if (stampState is NameDateStampState.Enabled &&
+        (stampState.nameText.isNotBlank() || stampState.dateText.isNotBlank())
+    ) {
+        val stripHeight = heightPixels * 0.155f
+        val stripTop = heightPixels - stripHeight
+
+        val stripBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = android.graphics.Color.WHITE
+        }
+        canvas.drawRect(0f, stripTop, widthPixels.toFloat(), heightPixels.toFloat(), stripBgPaint)
+
+        val borderLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = 0xFF222222.toInt()
+            strokeWidth = max(1.5f, widthPixels * 0.004f)
+        }
+        canvas.drawLine(0f, stripTop, widthPixels.toFloat(), stripTop, borderLinePaint)
+
+        val nameStr = stampState.nameText.trim().uppercase()
+        val dateStr = stampState.dateText.trim().uppercase()
+        val hasBoth = nameStr.isNotEmpty() && dateStr.isNotEmpty()
+
+        val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.BLACK
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            textSize = if (hasBoth) stripHeight * 0.34f else stripHeight * 0.42f
+        }
+        // Shrink font slightly if name is long so it stays cleanly inside width
+        val maxTextWidth = widthPixels * 0.92f
+        while (nameStr.isNotEmpty() && namePaint.measureText(nameStr) > maxTextWidth && namePaint.textSize > 12f) {
+            namePaint.textSize *= 0.92f
+        }
+
+        val datePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.BLACK
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            textSize = if (hasBoth) stripHeight * 0.30f else stripHeight * 0.40f
+        }
+
+        val centerX = widthPixels / 2f
+        if (hasBoth) {
+            val nameY = stripTop + stripHeight * 0.44f
+            val dateY = stripTop + stripHeight * 0.84f
+            canvas.drawText(nameStr, centerX, nameY, namePaint)
+            canvas.drawText(dateStr, centerX, dateY, datePaint)
+        } else if (nameStr.isNotEmpty()) {
+            val fm = namePaint.fontMetrics
+            val baseline = stripTop + (stripHeight - (fm.descent - fm.ascent)) / 2f - fm.ascent
+            canvas.drawText(nameStr, centerX, baseline, namePaint)
+        } else {
+            val fm = datePaint.fontMetrics
+            val baseline = stripTop + (stripHeight - (fm.descent - fm.ascent)) / 2f - fm.ascent
+            canvas.drawText(dateStr, centerX, baseline, datePaint)
+        }
+    }
+
     return outputBitmap
+}
+
+private fun compressSinglePassportToJpegBytes(
+    bitmap: Bitmap,
+    dimension: PassportSizeStandard,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float,
+    targetSizeKb: Int,
+    lightingConfig: PortraitLightingConfig,
+    stampState: NameDateStampState
+): ByteArray? {
+    var workingBitmap: Bitmap? = null
+    return try {
+        workingBitmap = renderSinglePassportBitmap(
+            bitmap = bitmap,
+            dimension = dimension,
+            bgColor = bgColor,
+            cropScale = cropScale,
+            cropOffsetX = cropOffsetX,
+            cropOffsetY = cropOffsetY,
+            lightingConfig = lightingConfig,
+            stampState = stampState
+        )
+
+        fun encodeAtQuality(bmp: Bitmap, quality: Int): ByteArray {
+            val baos = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+            return baos.toByteArray()
+        }
+
+        if (targetSizeKb <= 0) {
+            return encodeAtQuality(workingBitmap, 98)
+        }
+
+        val targetBytes = (targetSizeKb * 1024).coerceAtLeast(8 * 1024)
+        var bestBytes: ByteArray? = null
+
+        // Preserve official pixel dimensions first and binary-search JPEG quality 98..12
+        var scaleStep = 0
+        while (scaleStep <= 4 && workingBitmap != null) {
+            val maxQ = if (scaleStep == 0) 98 else 92
+            val maxBytes = encodeAtQuality(workingBitmap, maxQ)
+            if (maxBytes.size <= targetBytes) {
+                bestBytes = maxBytes
+                break
+            }
+
+            var low = 12
+            var high = maxQ - 1
+            var foundForScale: ByteArray? = null
+            while (low <= high) {
+                val mid = (low + high) / 2
+                val attempt = encodeAtQuality(workingBitmap, mid)
+                if (attempt.size <= targetBytes) {
+                    foundForScale = attempt
+                    low = mid + 1
+                } else {
+                    high = mid - 1
+                }
+            }
+
+            if (foundForScale != null) {
+                bestBytes = foundForScale
+                break
+            }
+
+            // Fallback: gently scale dimensions down only if even quality=12 exceeded targetBytes
+            val minAttempt = encodeAtQuality(workingBitmap, 12)
+            bestBytes = minAttempt
+            if (scaleStep == 4) break
+
+            val nextW = (workingBitmap.width * 0.88f).toInt().coerceAtLeast(180)
+            val nextH = (workingBitmap.height * 0.88f).toInt().coerceAtLeast(180)
+            val scaled = Bitmap.createScaledBitmap(workingBitmap, nextW, nextH, true)
+            if (scaled != workingBitmap) {
+                workingBitmap.recycle()
+                workingBitmap = scaled
+            }
+            scaleStep++
+        }
+
+        bestBytes ?: encodeAtQuality(workingBitmap!!, 92)
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    } finally {
+        try {
+            workingBitmap?.recycle()
+        } catch (_: Exception) {}
+    }
+}
+
+private suspend fun estimatePassportJpegSizeKb(
+    bitmap: Bitmap,
+    dimension: PassportSizeStandard,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float,
+    targetSizeKb: Int,
+    lightingConfig: PortraitLightingConfig,
+    stampState: NameDateStampState
+): Int? = withContext(Dispatchers.IO) {
+    val bytes = compressSinglePassportToJpegBytes(
+        bitmap = bitmap,
+        dimension = dimension,
+        bgColor = bgColor,
+        cropScale = cropScale,
+        cropOffsetX = cropOffsetX,
+        cropOffsetY = cropOffsetY,
+        targetSizeKb = targetSizeKb,
+        lightingConfig = lightingConfig,
+        stampState = stampState
+    ) ?: return@withContext null
+    max(1, ((bytes.size + 512) / 1024))
 }
 
 private suspend fun generatePassportJpeg(
@@ -2043,23 +3318,121 @@ private suspend fun generatePassportJpeg(
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,
-    cropOffsetY: Float
+    cropOffsetY: Float,
+    targetSizeKb: Int = 0,
+    lightingConfig: PortraitLightingConfig = PortraitLightingConfig(),
+    stampState: NameDateStampState = NameDateStampState.Off
 ): File? = withContext(Dispatchers.IO) {
     try {
-        val outputBitmap = renderSinglePassportBitmap(bitmap, dimension, bgColor, cropScale, cropOffsetX, cropOffsetY)
+        val bytes = compressSinglePassportToJpegBytes(
+            bitmap = bitmap,
+            dimension = dimension,
+            bgColor = bgColor,
+            cropScale = cropScale,
+            cropOffsetX = cropOffsetX,
+            cropOffsetY = cropOffsetY,
+            targetSizeKb = targetSizeKb,
+            lightingConfig = lightingConfig,
+            stampState = stampState
+        ) ?: return@withContext null
+
         val dir = File(context.cacheDir, "passports")
         if (!dir.exists()) dir.mkdirs()
         val file = File(dir, "Passport_Single_${System.currentTimeMillis()}.jpeg")
-
         FileOutputStream(file).use { out ->
-            outputBitmap.compress(Bitmap.CompressFormat.JPEG, 98, out)
+            out.write(bytes)
         }
-        outputBitmap.recycle()
         file
     } catch (e: Exception) {
         e.printStackTrace()
         null
     }
+}
+
+private fun renderPassportSheetBitmap(
+    bitmap: Bitmap,
+    dimension: PassportSizeStandard,
+    bgColor: Color,
+    cropScale: Float,
+    cropOffsetX: Float,
+    cropOffsetY: Float,
+    copyCount: PrintSheetCopyCount = PrintSheetCopyCount.EIGHT,
+    cutMarksState: PrintSheetCutMarksState = PrintSheetCutMarksState.ENABLED,
+    lightingConfig: PortraitLightingConfig = PortraitLightingConfig(),
+    stampState: NameDateStampState = NameDateStampState.Off
+): Bitmap {
+    val singleBmp = renderSinglePassportBitmap(
+        bitmap = bitmap,
+        dimension = dimension,
+        bgColor = bgColor,
+        cropScale = cropScale,
+        cropOffsetX = cropOffsetX,
+        cropOffsetY = cropOffsetY,
+        lightingConfig = lightingConfig,
+        stampState = stampState
+    )
+    // Standard 4x6 inch landscape print sheet at 300 DPI = 1800 x 1200 px
+    val sheetW = 1800
+    val sheetH = 1200
+    val sheetBmp = Bitmap.createBitmap(sheetW, sheetH, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(sheetBmp)
+    canvas.drawColor(0xFFFFFFFF.toInt())
+
+    val cols = copyCount.cols
+    val rows = copyCount.rows
+    val maxAllowedW = (sheetW - (cols + 1) * 44) / cols
+    val cellW = min(413, maxAllowedW)
+    val aspectH = (cellW.toFloat() * singleBmp.height.toFloat() / singleBmp.width.toFloat()).toInt()
+    val cellH = min(aspectH, (sheetH - (rows + 1) * 44) / rows)
+    val finalCellW = (cellH.toFloat() * singleBmp.width.toFloat() / singleBmp.height.toFloat()).toInt().coerceAtMost(cellW)
+    val scaledSingle = Bitmap.createScaledBitmap(singleBmp, finalCellW, cellH, true)
+    singleBmp.recycle()
+
+    val totalGridW = cols * finalCellW
+    val totalGridH = rows * cellH
+    val gapX = (sheetW - totalGridW) / (cols + 1)
+    val gapY = (sheetH - totalGridH) / (rows + 1)
+
+    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = 0xFFB8B8B8.toInt()
+        strokeWidth = 2f
+    }
+    val cutTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        color = 0xFF555555.toInt()
+        strokeWidth = 2.5f
+    }
+    val tickLen = 14f
+
+    for (r in 0 until rows) {
+        for (c in 0 until cols) {
+            val left = (gapX + c * (finalCellW + gapX)).toFloat()
+            val top = (gapY + r * (cellH + gapY)).toFloat()
+            val right = left + finalCellW
+            val bottom = top + cellH
+
+            canvas.drawBitmap(scaledSingle, left, top, null)
+
+            if (cutMarksState == PrintSheetCutMarksState.ENABLED) {
+                canvas.drawRect(left, top, right, bottom, borderPaint)
+                // Crisp L-shaped outer corner cut ticks for scissor alignment
+                canvas.drawLine(left - tickLen, top, left, top, cutTickPaint)
+                canvas.drawLine(left, top - tickLen, left, top, cutTickPaint)
+
+                canvas.drawLine(right, top, right + tickLen, top, cutTickPaint)
+                canvas.drawLine(right, top - tickLen, right, top, cutTickPaint)
+
+                canvas.drawLine(left - tickLen, bottom, left, bottom, cutTickPaint)
+                canvas.drawLine(left, bottom, left, bottom + tickLen, cutTickPaint)
+
+                canvas.drawLine(right, bottom, right + tickLen, bottom, cutTickPaint)
+                canvas.drawLine(right, bottom, right, bottom + tickLen, cutTickPaint)
+            }
+        }
+    }
+    scaledSingle.recycle()
+    return sheetBmp
 }
 
 private suspend fun generatePassportSheetJpeg(
@@ -2069,48 +3442,29 @@ private suspend fun generatePassportSheetJpeg(
     bgColor: Color,
     cropScale: Float,
     cropOffsetX: Float,
-    cropOffsetY: Float
+    cropOffsetY: Float,
+    copyCount: PrintSheetCopyCount = PrintSheetCopyCount.EIGHT,
+    cutMarksState: PrintSheetCutMarksState = PrintSheetCutMarksState.ENABLED,
+    lightingConfig: PortraitLightingConfig = PortraitLightingConfig(),
+    stampState: NameDateStampState = NameDateStampState.Off
 ): File? = withContext(Dispatchers.IO) {
     try {
-        val singleBmp = renderSinglePassportBitmap(bitmap, dimension, bgColor, cropScale, cropOffsetX, cropOffsetY)
-        // Standard 4x6 inch landscape print sheet at 300 DPI = 1800 x 1200 px (fits 8 standard passport photos in 4x2 grid)
-        val sheetW = 1800
-        val sheetH = 1200
-        val sheetBmp = Bitmap.createBitmap(sheetW, sheetH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(sheetBmp)
-        canvas.drawColor(0xFFFFFFFF.toInt())
-
-        val cols = 4
-        val rows = 2
-        val cellW = 390
-        val cellH = (cellW.toFloat() * singleBmp.height.toFloat() / singleBmp.width.toFloat()).toInt().coerceAtMost(520)
-        val scaledSingle = Bitmap.createScaledBitmap(singleBmp, cellW, cellH, true)
-        singleBmp.recycle()
-
-        val totalGridW = cols * cellW
-        val totalGridH = rows * cellH
-        val gapX = (sheetW - totalGridW) / (cols + 1)
-        val gapY = (sheetH - totalGridH) / (rows + 1)
-
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            color = 0xFFCCCCCC.toInt()
-            strokeWidth = 2f
-        }
-
-        for (r in 0 until rows) {
-            for (c in 0 until cols) {
-                val left = gapX + c * (cellW + gapX)
-                val top = gapY + r * (cellH + gapY)
-                canvas.drawBitmap(scaledSingle, left.toFloat(), top.toFloat(), null)
-                canvas.drawRect(left.toFloat(), top.toFloat(), (left + cellW).toFloat(), (top + cellH).toFloat(), borderPaint)
-            }
-        }
-        scaledSingle.recycle()
+        val sheetBmp = renderPassportSheetBitmap(
+            bitmap = bitmap,
+            dimension = dimension,
+            bgColor = bgColor,
+            cropScale = cropScale,
+            cropOffsetX = cropOffsetX,
+            cropOffsetY = cropOffsetY,
+            copyCount = copyCount,
+            cutMarksState = cutMarksState,
+            lightingConfig = lightingConfig,
+            stampState = stampState
+        )
 
         val dir = File(context.cacheDir, "passports")
         if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, "Passport_8Sheet_${System.currentTimeMillis()}.jpeg")
+        val file = File(dir, "Passport_${copyCount.count}Sheet_${System.currentTimeMillis()}.jpeg")
         FileOutputStream(file).use { out ->
             sheetBmp.compress(Bitmap.CompressFormat.JPEG, 98, out)
         }
